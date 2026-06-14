@@ -14,6 +14,7 @@ Setup
   install                          Add claudio hooks to ~/.claude/settings.json
   uninstall                        Remove claudio hooks from ~/.claude/settings.json
   status                           Show install + drone + preset state, hooks, sessions, songs, quant
+  doctor [--fix]                   Preflight check (python/numpy/player/samples/hooks); --fix renders if needed
   start                            Start the drone daemon for the active preset (no-op if no drone)
   stop                             Stop the drone process and kill afplay
   drone [on|off|status]            Drone bed — always follows the live root note (~½s retune)
@@ -349,6 +350,80 @@ def cmd_toggle():
         cmd_off()
 
 # ---------- status ----------
+
+def cmd_doctor(args):
+    """Preflight: verify everything Claudio needs is in place and say exactly
+    how to fix whatever isn't. `--fix` renders the active preset if its samples
+    are missing. Safe to run anytime; the /claudio skill runs this on silence."""
+    fix = "--fix" in args or "-f" in args
+    ok = True
+    def line(good, label, detail=""):
+        nonlocal ok
+        if not good: ok = False
+        print(f"  {'✓' if good else '✗'} {label}{('  — ' + detail) if detail else ''}")
+
+    print("Claudio doctor\n")
+    # 1. Python
+    v = sys.version_info
+    line(v >= (3, 9), f"Python {v.major}.{v.minor}", "" if v >= (3, 9) else "need 3.9+")
+    # 2. numpy (only needed to render/record — not to play)
+    try:
+        import numpy as _np
+        line(True, f"numpy {_np.__version__}")
+        have_np = True
+    except Exception:
+        line(False, "numpy", "render needs it → python3 -m pip install numpy")
+        have_np = False
+    # 3. audio player
+    try:
+        be = audio.get_backend()
+        line(be.kind != "null", f"audio player: {be.name}",
+             "" if be.kind != "null" else "install ffmpeg (Linux/Win) — see README requirements")
+    except Exception as e:
+        line(False, "audio player", str(e))
+    # 4. samples for the active preset
+    name = active_preset_name()
+    sdir = PRESETS / name / "samples"
+    wavs = list(sdir.rglob("*.wav")) if sdir.exists() else []
+    line(bool(wavs), f"sounds for '{name}'", "" if wavs else f"not rendered yet → claudio regen {name}")
+    # 5. config writable
+    try:
+        cfg = load_config(); save_config(cfg); line(True, "config writable")
+    except Exception as e:
+        line(False, "config writable", str(e))
+    # 6. hooks (manual install only — plugin hooks are managed by Claude Code)
+    s = load_settings(); wired = []
+    for ev, blocks in s.get("hooks", {}).items():
+        for b in blocks:
+            if any(h.get(MARKER) for h in b.get("hooks", [])): wired.append(ev); break
+    if wired:
+        line(True, "hooks wired (manual install)", f"{len(set(wired))} events")
+    else:
+        print("  • hooks: none in ~/.claude/settings.json — that's expected if you")
+        print("        installed the plugin (Claude Code manages those). Otherwise run")
+        print("        ./bin/claudio install")
+
+    if fix and not wavs and have_np:
+        render = PRESETS / name / "render.py"
+        if render.exists():
+            print(f"\n→ rendering '{name}' …")
+            r = subprocess_run_render(render)
+            print("  done." if r else "  render failed — see output above.")
+
+    print("\n" + ("✓ all set — start (or restart) a Claude Code session and listen."
+                  if ok else "✗ fix the ✗ items above, then run `claudio doctor` again."))
+    return 0 if ok else 1
+
+def subprocess_run_render(render_path):
+    import subprocess
+    try:
+        r = subprocess.run([sys.executable, str(render_path)], cwd=str(HERE),
+                           capture_output=True, text=True, timeout=600)
+        if r.returncode != 0:
+            print(r.stdout[-500:]); print(r.stderr[-500:], file=sys.stderr)
+        return r.returncode == 0
+    except Exception as e:
+        print(f"  {e}", file=sys.stderr); return False
 
 def cmd_status():
     s = load_settings()
@@ -1731,6 +1806,7 @@ def main(argv):
     elif cmd == "start":                cmd_start()
     elif cmd == "stop":                 cmd_stop()
     elif cmd == "drone":                cmd_drone(args)
+    elif cmd in ("doctor", "check"):    sys.exit(cmd_doctor(args))
     elif cmd == "status":               cmd_status()
     elif cmd == "test":                 cmd_test(args[0] if args else None)
     elif cmd == "volume" and args:      cmd_volume(args[0])

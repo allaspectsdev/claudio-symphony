@@ -18,9 +18,13 @@ Claudio turns Claude Code hook events into soft, in-key ambient music. It's inst
 
 ## If it's silent
 
-1. `claudio status` — shows whether it's on, the active preset, and whether hooks are wired.
-2. Samples render on first use. If a brand-new plugin install is silent, check `logs/SETUP_NEEDED.txt` — it usually means numpy is missing: `python3 -m pip install numpy`, then start a new session.
-3. Make sure it isn't muted (`claudio on`) and master volume is up.
+Run **`claudio doctor`** first — it checks Python, numpy, the audio player, whether the active preset's sounds are rendered, and whether hooks are wired, and prints the exact fix for anything missing. `claudio doctor --fix` will render the active preset for you if that's the problem.
+
+Common causes it surfaces:
+- **numpy missing** (needed to synthesize sounds): `python3 -m pip install numpy`, then start a new session.
+- **No sounds rendered yet** on a brand-new plugin install — `claudio doctor --fix` or `claudio regen` renders them. The plugin also renders the default room automatically on the first session.
+- **No audio player** on Linux/Windows: install `ffmpeg` (see README requirements).
+- **Muted / volume down**: `claudio on`, and raise master in `claudio web`.
 
 ## Full command reference
 
