@@ -3,36 +3,25 @@
 Claudio plugin bootstrap — runs once on SessionStart (alongside event.py) when
 Claudio is installed as a Claude Code plugin.
 
-A fresh plugin clone has no rendered samples (they're generated, not committed),
-so this makes the plugin actually make sound without the user running install.py
-by hand: if the active preset has no samples yet, it renders that one preset in
-a fully detached background process. It NEVER blocks the session (returns in a
-few ms; the render runs on its own), is idempotent (skips when samples exist),
-and self-limits its numpy bootstrap to a single attempt so it can't loop.
+Its ONE job is the numpy gap: a fresh plugin clone may not have numpy, which is
+needed to synthesize the sound samples. event.py renders presets on demand (so
+samples themselves are handled there, for every preset, not just the active
+one) — but that render needs numpy. So if numpy is missing, this kicks ONE
+fully-detached best-effort `pip install` and leaves a clear note; it NEVER
+blocks the session (returns in a few ms) and never loops.
 
-If numpy isn't available and can't be installed, it writes one clear note to
-logs/SETUP_NEEDED.txt and stays silent — graceful, never noisy.
+If numpy can't be installed, logs/SETUP_NEEDED.txt tells the user the one
+command to run. Once numpy is present, the note is cleared and event.py takes
+over rendering.
 """
-import sys, os, json, subprocess
+import sys, os, subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent      # plugin / repo root (bin/..)
-PRESETS = ROOT / "presets"
 STATE = ROOT / "state"
 LOGS = ROOT / "logs"
 PIP_MARK = STATE / ".pip-attempted"
-
-
-def active_preset():
-    try:
-        return json.loads((ROOT / "config.json").read_text()).get("preset", "meadow")
-    except Exception:
-        return "meadow"
-
-
-def has_samples(name):
-    d = PRESETS / name / "samples"
-    return d.is_dir() and next(d.rglob("*.wav"), None) is not None
+NOTE = LOGS / "SETUP_NEEDED.txt"
 
 
 def have_numpy():
@@ -43,39 +32,34 @@ def have_numpy():
         return False
 
 
+def spawn_detached(argv):
+    """Fire-and-forget: launch argv fully detached so it outlives the hook
+    timeout and never blocks the caller. Best-effort; failures are swallowed."""
+    try:
+        kw = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if hasattr(os, "setsid"):
+            kw["start_new_session"] = True
+        subprocess.Popen(argv, cwd=str(ROOT), **kw)
+    except Exception:
+        pass
+
+
 def main():
     STATE.mkdir(exist_ok=True)
     LOGS.mkdir(exist_ok=True)
-    name = active_preset()
-    if has_samples(name):
-        return 0                                    # already playable — nothing to do
-
-    if not have_numpy():
-        if not PIP_MARK.exists():                   # one best-effort install, ever
-            PIP_MARK.write_text("1")
-            try:
-                subprocess.run([sys.executable, "-m", "pip", "install", "--user", "--quiet", "numpy"],
-                               timeout=180, check=False,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
-        if not have_numpy():
-            (LOGS / "SETUP_NEEDED.txt").write_text(
-                "Claudio needs numpy to synthesize its sounds.\n"
-                "Run this once, then start a new session:\n\n"
-                f"    python3 -m pip install numpy && python3 \"{ROOT / 'install.py'}\"\n")
-            return 0
-
-    render = PRESETS / name / "render.py"
-    if render.exists():
-        try:
-            kw = {}
-            if hasattr(os, "setsid"):
-                kw["start_new_session"] = True       # detach from the 1s hook timeout
-            subprocess.Popen([sys.executable, str(render)], cwd=str(ROOT),
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw)
-        except Exception:
-            pass
+    if have_numpy():
+        try: NOTE.unlink()                          # setup done; event.py renders on demand
+        except Exception: pass
+        return 0
+    # numpy missing → guide + one detached best-effort install (never blocks)
+    NOTE.write_text(
+        "Claudio needs numpy to synthesize its sounds.\n"
+        "Trying to install it in the background now — start a new session in a minute.\n"
+        "If sound still doesn't come, run this once:\n\n"
+        f"    python3 -m pip install numpy && python3 \"{ROOT / 'install.py'}\"\n")
+    if not PIP_MARK.exists():
+        PIP_MARK.write_text("1")
+        spawn_detached([sys.executable, "-m", "pip", "install", "--user", "--quiet", "numpy"])
     return 0
 
 

@@ -20,7 +20,9 @@ Install it as a Claude Code plugin — two lines, pasted right into Claude Code:
 /plugin install claudio-symphony
 ```
 
-The hooks wire themselves and your next session starts playing — no editing `settings.json`. One prerequisite: **Python 3 + numpy** (`pip install numpy`). Run **`claudio doctor`** anytime to verify everything's in place. Prefer a hands-on setup, or not using plugins? See [Install](#-install).
+The hooks wire themselves and your next session starts playing — no editing `settings.json`. Each preset renders its sounds the first time it's used, so switching rooms just works. One prerequisite: **Python 3 + numpy** (`pip install numpy`); Claudio tries to install numpy for you on first run, and **`claudio doctor`** verifies everything anytime. Prefer a hands-on setup, or not using plugins? See [Install](#-install).
+
+> **macOS / Linux.** The plugin hooks call `python3`, which is standard there. On Windows `python3` often isn't on PATH — use the [manual install](#-install) (or alias `python3`) for now.
 
 ---
 

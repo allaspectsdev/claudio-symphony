@@ -1586,6 +1586,12 @@ function setViz(v) {
 }
 function startSky() { resizeSky(); setViz(OPTS.viz); requestAnimationFrame(drawSky); }
 function drawSky(t) {
+  // don't simulate/draw when the constellation can't be seen — the Jukebox
+  // view hides it, and a backgrounded tab doesn't need the n-body sim. Keep
+  // the rAF loop alive so it resumes instantly when shown again.
+  if (document.hidden || document.body.classList.contains('jukebox-view')) {
+    requestAnimationFrame(drawSky); return;
+  }
   ctx.clearRect(0, 0, sky.width, sky.height);
   const breath = 0.5 + 0.5 * Math.sin(t / 2600);
   ENERGY *= 0.994;                                     // slow exhale (~2s half-life)
@@ -1626,9 +1632,15 @@ function drawFlow(t, now, lv, breath) {
   const field = (x, y) => (Math.sin(x * sc + ts) + Math.cos(y * sc * 1.1 - ts * 0.8)
     + 0.5 * Math.sin((x + y) * sc * 0.6 + ts * 1.4)) * Math.PI;
   const target = Math.round(70 * lv);
-  let amb = 0; PARTS.forEach(p => { if (p.kind === 'amb') amb++; });
-  while (amb < target) { PARTS.push({ kind: 'amb', x: Math.random() * W, y: Math.random() * H, vx: 0, vy: 0, col: ACCENT.gold, tr: [] }); amb++; }
-  PARTS = PARTS.filter(p => p.kind === 'amb' || now - p.t0 < p.life);
+  // cull first — drop expired jets AND ambient particles beyond the current
+  // target (so lowering Visual energy actually thins the field), then top up.
+  let ambSeen = 0;
+  PARTS = PARTS.filter(p => {
+    if (p.kind === 'amb') { ambSeen++; return ambSeen <= target; }
+    return now - p.t0 < p.life;
+  });
+  for (let amb = Math.min(ambSeen, target); amb < target; amb++)
+    PARTS.push({ kind: 'amb', x: Math.random() * W, y: Math.random() * H, vx: 0, vy: 0, col: ACCENT.gold, tr: [] });
   PARTS.forEach(p => {
     const ang = field(p.x, p.y), sp = (p.kind === 'amb' ? 0.85 : 1.3) * DPR;
     p.vx += (Math.cos(ang) * sp - p.vx) * 0.14; p.vy += (Math.sin(ang) * sp - p.vy) * 0.14;

@@ -111,6 +111,40 @@ def load_preset(name):
         log(f"preset {name} parse error: {e}")
         return None
 
+def ensure_rendered(name):
+    """True if `name`'s samples exist (ready to play). Samples are generated,
+    not shipped, so the first time a preset is needed without them we kick ONE
+    detached render (via audio, which uses the running interpreter) and return
+    False so this event stays silent — later events play once it lands. Fast
+    path: a `.rendered` marker short-circuits the filesystem scan after success."""
+    sd = PRESETS / name / "samples"
+    sdir = preset_state_dir(name)
+    if (sdir / ".rendered").exists():
+        return True
+    if sd.is_dir() and next(sd.rglob("*.wav"), None) is not None:
+        try: (sdir / ".rendered").write_text("1")
+        except Exception: pass
+        return True
+    # no samples — start one render, guarded so we don't respawn every event.
+    # The guard is time-based: if a prior render didn't produce samples within
+    # ~90s (it crashed, e.g. numpy wasn't installed yet), we retry — so once
+    # numpy lands the bed renders without needing a fresh session.
+    spawn_mark = sdir / ".rendering"
+    fresh = False
+    try:
+        fresh = spawn_mark.exists() and (time.time() - float(spawn_mark.read_text() or 0) < 90)
+    except Exception:
+        fresh = spawn_mark.exists()
+    if not fresh:
+        render = PRESETS / name / "render.py"
+        if render.exists():
+            try:
+                spawn_mark.write_text(str(time.time()))
+                audio.spawn_python(str(render), cwd=str(HERE), detached=True)
+            except Exception as e:
+                log(f"render spawn failed for {name}: {e}")
+    return False
+
 def preset_state_dir(name):
     d = STATE / name
     d.mkdir(parents=True, exist_ok=True)
@@ -750,6 +784,15 @@ def handle(payload):
 
     if preset is None:
         log(f"no preset loaded ({preset_name}); silent")
+        return
+
+    # Render-on-demand: a preset's samples are generated, not shipped (esp. when
+    # Claudio is installed as a plugin). The first time we'd play a preset that
+    # has none, kick a one-time detached render and stay silent this round — the
+    # next events play once it lands. Covers every path (preset switch, pin,
+    # rule, default), not just the active preset at SessionStart.
+    if not ensure_rendered(preset_name):
+        log(f"[{preset_name}] no samples yet — started a background render; silent this round")
         return
 
     # Resolve song: session pin > preset's "song" > global.
