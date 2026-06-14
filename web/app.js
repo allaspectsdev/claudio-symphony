@@ -1790,7 +1790,7 @@ function hexA(hex, a) { if (hex[0] !== '#') return hex; const n = parseInt(hex.s
 // the mic can't hear Claudio → Listen skips its self-filter gap and reacts faster.
 // monitor: jam-through — your mic, with Claudio-style reverb+delay, in your ears.
 // monMix: monitor wet amount. energy: constellation liveliness (0 calm → 2 lively).
-const OPTS = Object.assign({ hue: null, headphones: false, monitor: false, monMix: 0.5, energy: 1, viz: 'orbs' },
+const OPTS = Object.assign({ hue: null, headphones: false, monitor: false, monMix: 0.5, energy: 1, viz: 'tides' },
   JSON.parse(localStorage.getItem('claudio_opts') || '{}'));
 let ACCENT = { gold: '#e8b25c', hi: '#ffd98a', rgb: [232, 178, 92] };
 const THEME_SWATCHES = [

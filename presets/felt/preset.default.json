@@ -2,15 +2,15 @@
   "name": "felt",
   "description": "Felt piano. Single notes with light tape muffle. A major pentatonic. Boards-of-Canada-clean: warm and simple, never busy.",
   "drone": null,
-  "master_gain": 0.48,
+  "master_gain": 0.52,
   "drone_gain": 0.0,
   "phrase_roots": [9, 4],
   "scale_pitches": [57, 59, 61, 64, 66, 69, 71, 73, 76, 78, 81],
   "voices": {
-    "felt_note": { "dir": "felt_note", "mioi": 0.35, "gain": 0.45, "rate_jitter": true },
+    "felt_note": { "dir": "felt_note", "mioi": 0.35, "gain": 0.20, "rate_jitter": true },
     "low_note": { "dir": "low_note", "mioi": 4.0, "gain": 0.42 },
-    "soft_tap": { "dir": "soft_tap", "mioi": 0.06, "gain": 0.40, "rate_jitter": true, "tonal_anchor_midi": 60 },
-    "warm_bell": { "dir": "warm_bell", "mioi": 8.0, "gain": 0.38 }
+    "soft_tap": { "dir": "soft_tap", "mioi": 0.06, "gain": 0.30, "rate_jitter": true, "tonal_anchor_midi": 69 },
+    "warm_bell": { "dir": "warm_bell", "mioi": 8.0, "gain": 0.52 }
   },
   "events": {
     "PreToolUse":       { "default": "soft_tap" },

@@ -4,16 +4,19 @@
   "drone": null,
   "master_gain": 0.38,
   "drone_gain": 0.0,
+  "scale_pitches": [69, 71, 73, 75, 76, 78, 80, 81, 83, 85, 88, 90],
   "voices": {
     "drop": {
       "dir": "drop",
       "mioi": 0.018,
-      "gain": 0.45
+      "gain": 0.45,
+      "rate_jitter": true
     },
     "tap": {
       "dir": "tap",
       "mioi": 0.04,
-      "gain": 0.4
+      "gain": 0.4,
+      "rate_jitter": true
     },
     "swell": {
       "dir": "swell",

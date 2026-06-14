@@ -2,25 +2,82 @@
   "name": "glow",
   "description": "Like meadow but gentler. A major pentatonic. Felt mallet, soft chime, wood tap, tiny upward flourish. Light reverb, clean attacks, no long pads.",
   "drone": null,
-  "master_gain": 0.50,
+  "master_gain": 0.5,
   "drone_gain": 0.0,
-  "phrase_roots": [9, 4],
-  "scale_pitches": [57, 59, 61, 64, 66, 69, 71, 73, 76, 78, 81],
+  "phrase_roots": [
+    9,
+    4
+  ],
+  "scale_pitches": [
+    57,
+    59,
+    61,
+    64,
+    66,
+    69,
+    71,
+    73,
+    76,
+    78,
+    81
+  ],
   "voices": {
-    "mallet": { "dir": "mallet", "mioi": 0.30, "gain": 0.35, "rate_jitter": true },
-    "chime": { "dir": "chime", "mioi": 0.6, "gain": 0.30 },
-    "wood": { "dir": "wood", "mioi": 0.06, "gain": 0.55, "rate_jitter": true, "tonal_anchor_midi": 69 },
-    "flourish": { "dir": "flourish", "mioi": 18.0, "gain": 0.42 }
+    "mallet": {
+      "dir": "mallet",
+      "mioi": 0.3,
+      "gain": 0.35,
+      "rate_jitter": true
+    },
+    "chime": {
+      "dir": "chime",
+      "mioi": 0.6,
+      "gain": 0.3
+    },
+    "wood": {
+      "dir": "wood",
+      "mioi": 0.06,
+      "gain": 0.55,
+      "rate_jitter": true,
+      "tonal_anchor_midi": 69
+    },
+    "flourish": {
+      "dir": "flourish",
+      "mioi": 18.0,
+      "gain": 0.42
+    }
   },
   "events": {
-    "PreToolUse":       { "default": "wood", "by_tool": { "Bash": "wood" } },
-    "PostToolUse":      { "default": "mallet", "on_failure": "chime" },
-    "Stop":             { "default": "chime" },
-    "SessionStart":     { "default": "flourish" },
-    "SessionEnd":       { "default": "chime" },
-    "SubagentStop":     { "default": "chime" },
-    "UserPromptSubmit": { "default": "wood" },
-    "Notification":     { "default": "chime" },
-    "PreCompact":       { "default": "flourish" }
-  }
+    "PreToolUse": {
+      "default": "wood",
+      "by_tool": {
+        "Bash": "wood"
+      }
+    },
+    "PostToolUse": {
+      "default": "mallet",
+      "on_failure": "chime"
+    },
+    "Stop": {
+      "default": "chime"
+    },
+    "SessionStart": {
+      "default": "flourish"
+    },
+    "SessionEnd": {
+      "default": "chime"
+    },
+    "SubagentStop": {
+      "default": "chime"
+    },
+    "UserPromptSubmit": {
+      "default": "wood"
+    },
+    "Notification": {
+      "default": "chime"
+    },
+    "PreCompact": {
+      "default": "flourish"
+    }
+  },
+  "reverb_scale": 1.0
 }
