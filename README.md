@@ -11,6 +11,19 @@ It is **not** a notification system. It's a room your Claude session is happenin
 
 ---
 
+## ⚡ Quick start
+
+Install it as a Claude Code plugin — two lines, pasted right into Claude Code:
+
+```
+/plugin marketplace add rmtbb/claudio-symphony
+/plugin install claudio-symphony
+```
+
+The hooks wire themselves and your next session starts playing — no editing `settings.json`. One prerequisite: **Python 3 + numpy** (`pip install numpy`). Run **`claudio doctor`** anytime to verify everything's in place. Prefer a hands-on setup, or not using plugins? See [Install](#-install).
+
+---
+
 ## ✨ Why you'll love it
 
 - 🎧 **It's calm, not noisy.** No beeps, no buzzes, no notification DNA. Soothing tones, soft mallets, distant bells — everything tuned to the same key (A = 432 Hz) so it never clashes, no matter how fast Claude is moving.
