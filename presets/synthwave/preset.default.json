@@ -1,0 +1,26 @@
+{
+  "name": "synthwave",
+  "description": "Neon 80s kit — punchy kick, big gated-reverb snare, fat saw bass, a bright detuned lead, a plucky arp and a warm poly pad. Retro-future; made for the Jukebox.",
+  "master_gain": 0.5,
+  "scale_pitches": [33, 36, 40, 45, 48, 52, 57, 60, 64, 69, 72],
+  "voices": {
+    "kick":  { "dir": "kick",  "gain": 0.6,  "mioi": 0.08 },
+    "snare": { "dir": "snare", "gain": 0.46, "mioi": 0.1,  "reverb": {"wet": 0.42} },
+    "hat":   { "dir": "hat",   "gain": 0.32, "mioi": 0.05 },
+    "bass":  { "dir": "bass",  "gain": 0.52, "mioi": 0.1 },
+    "lead":  { "dir": "lead",  "gain": 0.42, "mioi": 0.12, "reverb": {"wet": 0.3} },
+    "arp":   { "dir": "arp",   "gain": 0.38, "mioi": 0.08, "reverb": {"wet": 0.28} },
+    "pad":   { "dir": "pad",   "gain": 0.4,  "mioi": 4.0,  "reverb": {"wet": 0.5} }
+  },
+  "events": {
+    "SessionStart":     { "default": "pad",   "by_tool": {}, "on_failure": null },
+    "UserPromptSubmit": { "default": "kick",  "by_tool": {}, "on_failure": null },
+    "PreToolUse":       { "default": "hat",   "by_tool": {}, "on_failure": null },
+    "PostToolUse":      { "default": "arp",   "by_tool": {}, "on_failure": "snare" },
+    "SubagentStop":     { "default": "snare", "by_tool": {}, "on_failure": null },
+    "Stop":             { "default": "lead",  "by_tool": {}, "on_failure": null },
+    "Notification":     { "default": "lead",  "by_tool": {}, "on_failure": null },
+    "SessionEnd":       { "default": "bass",  "by_tool": {}, "on_failure": null },
+    "PreCompact":       { "default": "snare", "by_tool": {}, "on_failure": null }
+  }
+}

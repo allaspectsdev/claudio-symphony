@@ -1,0 +1,26 @@
+{
+  "name": "dnb",
+  "description": "Drum & Bass kit — punchy breaks, a pure sine sub, a growling reese, minor stabs and an airy pad. Dark and fast; built for the Jukebox but a moody room too.",
+  "master_gain": 0.5,
+  "scale_pitches": [33, 36, 39, 45, 48, 51, 57, 60, 63, 69],
+  "voices": {
+    "kick":  { "dir": "kick",  "gain": 0.62, "mioi": 0.08 },
+    "snare": { "dir": "snare", "gain": 0.5,  "mioi": 0.08 },
+    "hat":   { "dir": "hat",   "gain": 0.34, "mioi": 0.05 },
+    "sub":   { "dir": "sub",   "gain": 0.6,  "mioi": 0.1 },
+    "reese": { "dir": "reese", "gain": 0.42, "mioi": 0.1 },
+    "stab":  { "dir": "stab",  "gain": 0.4,  "mioi": 0.12, "reverb": {"wet": 0.25} },
+    "pad":   { "dir": "pad",   "gain": 0.4,  "mioi": 4.0,  "reverb": {"wet": 0.5} }
+  },
+  "events": {
+    "SessionStart":     { "default": "sub",   "by_tool": {}, "on_failure": null },
+    "UserPromptSubmit": { "default": "kick",  "by_tool": {}, "on_failure": null },
+    "PreToolUse":       { "default": "hat",   "by_tool": {}, "on_failure": null },
+    "PostToolUse":      { "default": "reese", "by_tool": {}, "on_failure": "snare" },
+    "SubagentStop":     { "default": "stab",  "by_tool": {}, "on_failure": null },
+    "Stop":             { "default": "pad",   "by_tool": {}, "on_failure": null },
+    "Notification":     { "default": "stab",  "by_tool": {}, "on_failure": null },
+    "SessionEnd":       { "default": "sub",   "by_tool": {}, "on_failure": null },
+    "PreCompact":       { "default": "snare", "by_tool": {}, "on_failure": null }
+  }
+}

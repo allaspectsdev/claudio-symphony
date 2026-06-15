@@ -1,0 +1,25 @@
+{
+  "name": "lofi",
+  "description": "Dusty lo-fi hip-hop kit — soft kick, laid-back rimshot, gentle hat, round upright bass, a Rhodes-y keys voice and a hazy pad. Warm and chill; made for the Jukebox.",
+  "master_gain": 0.52,
+  "scale_pitches": [33, 36, 40, 45, 48, 52, 55, 57, 60, 64, 67, 69],
+  "voices": {
+    "kick": { "dir": "kick", "gain": 0.58, "mioi": 0.1 },
+    "rim":  { "dir": "rim",  "gain": 0.42, "mioi": 0.1 },
+    "hat":  { "dir": "hat",  "gain": 0.3,  "mioi": 0.06 },
+    "bass": { "dir": "bass", "gain": 0.5,  "mioi": 0.12 },
+    "keys": { "dir": "keys", "gain": 0.44, "mioi": 0.12, "reverb": {"wet": 0.3} },
+    "pad":  { "dir": "pad",  "gain": 0.4,  "mioi": 4.0,  "reverb": {"wet": 0.5} }
+  },
+  "events": {
+    "SessionStart":     { "default": "keys", "by_tool": {}, "on_failure": null },
+    "UserPromptSubmit": { "default": "kick", "by_tool": {}, "on_failure": null },
+    "PreToolUse":       { "default": "hat",  "by_tool": {}, "on_failure": null },
+    "PostToolUse":      { "default": "keys", "by_tool": {}, "on_failure": "rim" },
+    "SubagentStop":     { "default": "rim",  "by_tool": {}, "on_failure": null },
+    "Stop":             { "default": "pad",  "by_tool": {}, "on_failure": null },
+    "Notification":     { "default": "keys", "by_tool": {}, "on_failure": null },
+    "SessionEnd":       { "default": "bass", "by_tool": {}, "on_failure": null },
+    "PreCompact":       { "default": "rim",  "by_tool": {}, "on_failure": null }
+  }
+}

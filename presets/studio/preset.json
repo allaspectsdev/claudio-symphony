@@ -1,24 +1,94 @@
 {
   "name": "studio",
-  "description": "The MIDI demo kit — drums, bass and soft synth. Built for the Jukebox: hand a track its drums, bass line and lead, then save your mix as a preset. Works as a (lively) room too.",
+  "description": "The MIDI demo kit \u2014 drums, bass and soft synth. Built for the Jukebox: hand a track its drums, bass line and lead, then save your mix as a preset. Works as a (lively) room too.",
   "master_gain": 0.5,
-  "scale_pitches": [33, 36, 45, 48, 57, 61, 64, 69, 73, 76],
+  "scale_pitches": [
+    33,
+    36,
+    45,
+    48,
+    57,
+    61,
+    64,
+    69,
+    73,
+    76
+  ],
   "voices": {
-    "kick":  { "dir": "kick",  "gain": 0.6,  "mioi": 0.1 },
-    "snare": { "dir": "snare", "gain": 0.5,  "mioi": 0.1 },
-    "hat":   { "dir": "hat",   "gain": 0.35, "mioi": 0.06 },
-    "bass":  { "dir": "bass",  "gain": 0.55, "mioi": 0.12 },
-    "synth": { "dir": "synth", "gain": 0.45, "mioi": 0.12 }
+    "kick": {
+      "dir": "kick",
+      "gain": 0.6,
+      "mioi": 0.1,
+      "reverb": {
+        "wet": 0.63
+      }
+    },
+    "snare": {
+      "dir": "snare",
+      "gain": 0.5,
+      "mioi": 0.1
+    },
+    "hat": {
+      "dir": "hat",
+      "gain": 0.35,
+      "mioi": 0.06
+    },
+    "bass": {
+      "dir": "bass",
+      "gain": 0.55,
+      "mioi": 0.12
+    },
+    "synth": {
+      "dir": "synth",
+      "gain": 0.45,
+      "mioi": 0.12
+    }
   },
   "events": {
-    "SessionStart":     { "default": "kick",  "by_tool": {}, "on_failure": null },
-    "UserPromptSubmit": { "default": "kick",  "by_tool": {}, "on_failure": null },
-    "PreToolUse":       { "default": "hat",   "by_tool": {}, "on_failure": null },
-    "PostToolUse":      { "default": "bass",  "by_tool": {}, "on_failure": "snare" },
-    "SubagentStop":     { "default": "snare", "by_tool": {}, "on_failure": null },
-    "Stop":             { "default": "synth", "by_tool": {}, "on_failure": null },
-    "Notification":     { "default": "synth", "by_tool": {}, "on_failure": null },
-    "SessionEnd":       { "default": "bass",  "by_tool": {}, "on_failure": null },
-    "PreCompact":       { "default": "snare", "by_tool": {}, "on_failure": null }
+    "SessionStart": {
+      "default": "kick",
+      "by_tool": {},
+      "on_failure": null
+    },
+    "UserPromptSubmit": {
+      "default": "kick",
+      "by_tool": {},
+      "on_failure": null
+    },
+    "PreToolUse": {
+      "default": "hat",
+      "by_tool": {},
+      "on_failure": null
+    },
+    "PostToolUse": {
+      "default": "bass",
+      "by_tool": {},
+      "on_failure": "snare"
+    },
+    "SubagentStop": {
+      "default": "snare",
+      "by_tool": {},
+      "on_failure": null
+    },
+    "Stop": {
+      "default": "synth",
+      "by_tool": {},
+      "on_failure": null
+    },
+    "Notification": {
+      "default": "synth",
+      "by_tool": {},
+      "on_failure": null
+    },
+    "SessionEnd": {
+      "default": "bass",
+      "by_tool": {},
+      "on_failure": null
+    },
+    "PreCompact": {
+      "default": "snare",
+      "by_tool": {},
+      "on_failure": null
+    }
   }
 }

@@ -7,7 +7,7 @@ Claudio listens to Claude Code's hook events and turns them into generative, alw
 It is **not** a notification system. It's a room your Claude session is happening inside. After about twenty minutes you stop hearing it as *music* and start hearing it as *the room* — and the room moves with your work.
 
 ![Claudio web console — a living constellation of voices that bloom in real time as Claude plays them](docs/web-console.png)
-> *The `claudio web` console: each voice is a glowing orb that lights up the instant Claude triggers it. Tune everything live; switch any of 37 presets with a click.*
+> *The `claudio web` console: each voice is a glowing orb that lights up the instant Claude triggers it. Tune everything live; switch any of 40 presets with a click.*
 
 ---
 
@@ -31,7 +31,7 @@ The hooks wire themselves and your next session starts playing — no editing `s
 - 🎧 **It's calm, not noisy.** No beeps, no buzzes, no notification DNA. Soothing tones, soft mallets, distant bells — everything tuned to the same key (A = 432 Hz) so it never clashes, no matter how fast Claude is moving.
 - 👂 **You can *hear* what your agent is doing.** A pluck for a tool call, a chime when a sub-agent returns, a slow bloom when a turn finishes. Without looking, you know whether Claude is grinding, waiting, or done.
 - 🪟 **Hear every session at once.** Running Claude in five terminals? Give each project its own room. Now the chord of your whole workspace is audible — you can tell the quiet one finished and the busy one hit an error, eyes closed.
-- 🎹 **37 presets, each a complete world.** Sunlit music box, lush cathedral, near-silent rainfall, plucked koto, vibraphone lounge, handbell carillon, Rhodes warmth… switch live, mid-session, with one command.
+- 🎹 **40 presets, each a complete world.** Sunlit music box, lush cathedral, near-silent rainfall, plucked koto, vibraphone lounge, handbell carillon, Rhodes warmth… switch live, mid-session, with one command.
 - 🖥️ **A console you'll leave open just to watch.** A living constellation of your voices blooms in real time as Claude plays them — and the canvas *narrates the work*: a finished turn breaks across the screen as a slow wave of light, a sub-agent return is a smaller echo, "needs you" pulses the edges. Five physics-driven views (orbs that nudge each other, ripples, ribbons, a particle current, orbiting stars). Click an orb to hear it; drag a slider to tune.
 - 🎤 **It jams with the room.** Hit **Listen** and Claudio detects what you're humming — or what music you're playing — and re-keys its whole palette to match, live. Put on headphones, enable **mic monitor**, and your own voice or instrument comes back drenched in Claudio's reverb and delay: you're not listening to your agent anymore, you're *in the band with it*. Turn on a chord progression and the room cycles changes underneath you while you play.
 - 🎚️ **Tune everything, or nothing.** Sensible defaults out of the box — or open the TUI / web panel and shape every voice, reverb tail, and event mapping to taste.
@@ -69,7 +69,7 @@ Most of the time you hear nothing. PostToolUse plays a tiny 250 ms drop — a si
 
 A different emotional space from the bright A-major family — minor-leaning, Japanese, unhurried. Koto for melody, bowl for sustains, mokugyo (wooden fish) for accents.
 
-### 🌌  …and 33 more
+### 🌌  …and 36 more
 Crystal glass bowls (`glassbright`), vibraphone (`lounge`), handbell carillon (`peal`), steel pan (`isleshine`), hammered dulcimer (`shimmerwire`), Rhodes EP (`tinewarm`), vocal-oo choir (`choirloft`), nylon guitar (`courtyard`), ocarina (`clayround`), santoor (`sunraga`), and many more — each a complete, render-tested room.
 
 > **Hear them all in seconds:** `claudio audition` walks every preset on your speakers, or open the web panel and click ▶ on any card.
@@ -108,7 +108,7 @@ A "warm nocturne observatory" you'll actually want to leave open:
 - ✨ **The light reacts to the work** — on top of every view, the moments that matter announce themselves: when Claude **finishes a turn** a luminous shockwave rolls out across the canvas; a **sub-agent** returning is a quieter ripple; a **notification** glows the edges; session start sweeps, session end fades. Tool calls stay calm, so the big beats land. You can feel the shape of a session from across the room.
 - 🎚️ **Tune anything live** — per-voice gain, reverb, echo; remap any event; switch presets; set per-session rules — all written to the same files the CLI and hooks read, so every change is instant.
 - 🔊 **The Sounds tab puts cause and effect in one view** — "Claude does this → you hear that" up top, the full voice rack right below. Hover any event and hit **✎** to jump straight to that voice's controls; clicking a constellation orb does the same. Three tabs total: **Sounds · Music · Setup**.
-- 🔭 **Browse 37 presets** in a searchable gallery, audition with one click.
+- 🔭 **Browse 40 presets** in a searchable gallery, audition with one click.
 - 🎵 **Music tab** — global scale override, quantize-to-tempo, MIDI song mode, and a live **root-note** readout.
 - 🎶 **Chord progressions** — cycle the whole room through the four-chord pop song (I–V–vi–IV), doo-wop, the Andalusian cadence, Pachelbel's Canon, or a lo-fi ii–V–I–vi — or build your own from thirteen chords. The live chord glows in the Music tab and sweeps toward the next change. No daemon, no clock process: the chord is pure wall-time math, so every session and the browser always agree on where you are in the cycle. The drone holds its A pedal underneath — the classic ambient move — or flip **Drone follows chords** (Setup tab, `claudio drone follow on`) and the bed walks the progression's roots with you. And if you've mic-jammed to a new key, the whole progression transposes too. CLI: `claudio chords pop`, `claudio chords Am F C G`, `claudio chords every 12`, `claudio chords off`.
 - 🎤 **Jam with the room** — hit **Listen** and Claudio tunes its key to whatever's around you. (See below.)
@@ -150,7 +150,7 @@ Here's the neat part: because Claudio already knows every sound it plays, record
 
 Prefer buttons? Hit **● Rec** in `claudio web` — pick a length, optionally flip on the drone bed, go work in your sessions, and grab the clip with a built-in player and download link.
 
-**🎹 Jukebox (a little easter egg).** Don't want to wait for Claude to make sounds? *Perform* a whole MIDI file through Claudio's voices. Pick the **sound kit** in the header — any of the 37 presets, independent of the room you're working in (try **`studio`**, a drums · bass · synth kit built for exactly this). Each track shows its register, note range, and a density bar, then maps to a sound however you like: to an **event** (with live fire counts, so the melody can ride whatever your sessions use most), to **any voice directly**, or **⊞ any sound from any preset**. Preview a row with ▶, or hit **✨ smart arrange** and Claudio matches drums to percussive sounds and melodies to voices in the right register. Pitch always comes from the MIDI — pitched voices land exactly on every note. The Sounds tab and constellation bloom in time as it plays; start a recording first and you've captured a whole song in your palette; and when a mix sounds right, **💾 save as preset** turns it into a self-contained room you can use anywhere. Open it with the **`.`** after *Claudio* (or the Music-tab **🎹 Jukebox** button), drop in any `.mid`, and press play. CLI: `claudio play <song>` (`claudio song import <file.mid>` to add one).
+**🎹 Jukebox (a little easter egg).** Don't want to wait for Claude to make sounds? *Perform* a whole MIDI file through Claudio's voices. Pick the **sound kit** in the header — any of the 40 presets, independent of the room you're working in. Four are purpose-built song kits with real drums, bass and melodic voices: **`studio`** (clean drums · bass · synth), **`dnb`** (breakbeats, sub + reese bass, stabs & pad), **`synthwave`** (gated-snare 80s with saw bass, lead, arp & poly pad), and **`lofi`** (dusty kit, upright bass, Rhodes-y keys & a hazy pad). Each track shows its register, note range, and a density bar, then maps to a sound however you like: to an **event** (with live fire counts, so the melody can ride whatever your sessions use most), to **any voice directly**, or **⊞ any sound from any preset**. Preview a row with ▶, or hit **✨ smart arrange** and Claudio matches drums to percussive sounds and melodies to voices in the right register. Pitch always comes from the MIDI — pitched voices land exactly on every note. The Sounds tab and constellation bloom in time as it plays; start a recording first and you've captured a whole song in your palette; and when a mix sounds right, **💾 save as preset** turns it into a self-contained room you can use anywhere. Open it with the **`.`** after *Claudio* (or the Music-tab **🎹 Jukebox** button), drop in any `.mid`, and press play. CLI: `claudio play <song>` (`claudio song import <file.mid>` to add one).
 
 **🎬 Session mini-tracks — replay your workflow.** Every Claude session is quietly captured as a tiny **symbolic timeline** (a few KB of JSON — just *what happened, when*, no audio). In `claudio web`, each session in the left rail gets a **heavy-traffic sparkline** (see the dense, bursty stretches at a glance) and a **▶ replay** button. Replay re-runs your actual workflow as music through *any* preset — so you can audition the same session across presets and tune until it sounds great. Idle gaps are compressed so the busy parts stay punchy. Then **● render WAV** bounces it to a shareable clip, or **⤓ score** saves the tiny `.score.json` (far lighter to share than a WAV, and replayable anywhere). From the CLI: `claudio replay list`, `claudio replay <session|latest> [--preset X] [--tempo 1] [--loop] [--render]`.
 
@@ -184,7 +184,7 @@ python3 install.py            # deps + render samples + write starter config
 
 Open a new Claude Code session and listen. That's it.
 
-> **👉 There's a full UI.** Run **`claudio web`** to open the browser control panel — a live constellation of your voices where you can tune everything, browse and switch all 37 presets, build your own, and record clips. No build step, runs locally on `127.0.0.1`. See [The web control panel](#️-the-web-control-panel).
+> **👉 There's a full UI.** Run **`claudio web`** to open the browser control panel — a live constellation of your voices where you can tune everything, browse and switch all 40 presets, build your own, and record clips. No build step, runs locally on `127.0.0.1`. See [The web control panel](#️-the-web-control-panel).
 
 **Requirements**
 - 🖥️ **macOS, Linux, or Windows.** Claudio auto-detects the best audio player on your system (override with `CLAUDIO_PLAYER`):
@@ -204,7 +204,7 @@ Tip: add `alias claudio='~/path/to/claudio-symphony/bin/claudio'` to your shell 
 
 ```bash
 claudio status                          # what's installed and active
-claudio preset list                     # see all 37 presets
+claudio preset list                     # see all 40 presets
 claudio preset use cathedral            # switch live (no Claude restart)
 claudio off / claudio on                # silence everything / restore
 claudio web                             # the browser control panel
@@ -253,10 +253,10 @@ claudio song use mario                    # drive a voice from a MIDI melody
 
 ## 🎨 Make your own preset
 
-**The easy way — build one in the browser.** Open `claudio web`, hit **✚ Build a preset**, and you get a palette of *every voice from all 37 presets*. Audition any sound with ▶, pick the ones you love, name it, and hit Create — Claudio copies those samples into a new, self-contained preset that works everywhere instantly (start blank, or duplicate an existing preset and add to it). No code, no render step.
+**The easy way — build one in the browser.** Open `claudio web`, hit **✚ Build a preset**, and you get a palette of *every voice from all 40 presets*. Audition any sound with ▶, pick the ones you love, name it, and hit Create — Claudio copies those samples into a new, self-contained preset that works everywhere instantly (start blank, or duplicate an existing preset and add to it). No code, no render step.
 
 - **Swap a single sound** — in the Sounds tab, the **↺** button on any voice lets you replace just that one sound with any voice from any preset, keeping its level, echo, and event mappings.
-- **Manage your presets** — custom presets you build get **rename** (✎) and **delete** (🗑) right on their gallery card; the 37 shipped presets are protected and can't be deleted.
+- **Manage your presets** — custom presets you build get **rename** (✎) and **delete** (🗑) right on their gallery card; the 40 shipped presets are protected and can't be deleted.
 
 **The hands-on way — author it in code.** Each preset is three things:
 

@@ -1,6 +1,6 @@
 # Creating presets for Claudio Symphony
 
-A preset is a **room** — a self-contained tonal world that responds to Claude Code hook events with a coherent set of sounds. Thirty-seven ship in the box (meadow, cathedral, rainfall, koto, and 33 more — `claudio preset list`). This doc walks you through making your own in code; for the no-code path, hit **✚ Build a preset** in `claudio web`.
+A preset is a **room** — a self-contained tonal world that responds to Claude Code hook events with a coherent set of sounds. Forty ship in the box (meadow, cathedral, rainfall, koto, and 36 more — `claudio preset list`). This doc walks you through making your own in code; for the no-code path, hit **✚ Build a preset** in `claudio web`.
 
 The bar to clear is not novelty but **cohesion**: every voice in a preset should belong to the same room. A bright kalimba next to a dusty granular pad is fine; a buzzy FM bell next to a warm piano is not.
 
