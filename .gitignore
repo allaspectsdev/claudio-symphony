@@ -14,6 +14,7 @@ logs/
 config.json
 *.tmp
 *.pid
+*.lock
 
 # Recorded session clips — user content; share them, don't commit them
 recordings/

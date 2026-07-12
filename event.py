@@ -22,6 +22,7 @@ sys.path.insert(0, str(HERE))
 import song as song_mod  # noqa: E402  (sibling module, must come after sys.path)
 import audio  # noqa: E402  (cross-platform playback backend; same path insert)
 import timeline as timeline_mod  # noqa: E402  (owns the timeline dir + safe_sid; reader must match this writer)
+import stateio  # noqa: E402  (cross-process JSON transactions)
 PRESETS = HERE / "presets"
 STATE = HERE / "state"
 LOGS = HERE / "logs"
@@ -80,9 +81,7 @@ def _load(p, default):
     return default
 
 def _save(p, d):
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(d, indent=2))
-    tmp.rename(p)
+    stateio.save_json(p, d, indent=2, newline=False)
 
 def read_config(): return _load(CONFIG, {})
 
@@ -101,6 +100,9 @@ def active_preset_name():
     return read_config().get("preset", DEFAULT_PRESET)
 
 def load_preset(name):
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name):
+        log(f"invalid preset name: {name!r}")
+        return None
     p = PRESETS / name / "preset.json"
     if not p.exists():
         log(f"preset.json missing for {name}")
@@ -130,19 +132,20 @@ def ensure_rendered(name):
     # ~90s (it crashed, e.g. numpy wasn't installed yet), we retry — so once
     # numpy lands the bed renders without needing a fresh session.
     spawn_mark = sdir / ".rendering"
-    fresh = False
     try:
-        fresh = spawn_mark.exists() and (time.time() - float(spawn_mark.read_text() or 0) < 90)
-    except Exception:
-        fresh = spawn_mark.exists()
-    if not fresh:
-        render = PRESETS / name / "render.py"
-        if render.exists():
+        with stateio.file_lock(spawn_mark, timeout=1.0):
             try:
+                fresh = spawn_mark.exists() and (time.time() - float(spawn_mark.read_text() or 0) < 90)
+            except Exception:
+                fresh = spawn_mark.exists()
+            if not fresh:
+                render = PRESETS / name / "render.py"
+                if not render.exists():
+                    return False
                 spawn_mark.write_text(str(time.time()))
                 audio.spawn_python(str(render), cwd=str(HERE), detached=True)
-            except Exception as e:
-                log(f"render spawn failed for {name}: {e}")
+    except Exception as e:
+        log(f"render spawn failed for {name}: {e}")
     return False
 
 def preset_state_dir(name):
@@ -230,26 +233,24 @@ def resolve_preset(session_id, cwd):
 def update_session_record(session_id, cwd, event_name, resolved_preset, source):
     if not session_id:
         return
-    sessions = load_sessions()
-    active = sessions.setdefault("active", {})
-    # prune stale
-    cutoff = time.time() - SESSION_TTL_S
-    for sid in list(active.keys()):
-        if active[sid].get("last_seen", 0) < cutoff and sid != session_id:
-            del active[sid]
-            try: (TIMELINE / f"{timeline_mod.safe_sid(sid)}.ndjson").unlink()   # drop its score too
-            except Exception: pass
-    rec = active.setdefault(session_id, {})
-    now = time.time()
-    rec.setdefault("first_seen", now)
-    rec["last_seen"] = now
-    if cwd: rec["cwd"] = cwd
-    rec["preset_resolved"] = resolved_preset
-    rec["preset_source"] = source
-    if event_name == "SessionEnd":
-        rec["ended"] = True
-    sessions["active"] = active
-    try: save_sessions(sessions)
+    def mutate(sessions):
+        active = sessions.setdefault("active", {})
+        cutoff = time.time() - SESSION_TTL_S
+        for sid in list(active.keys()):
+            if active[sid].get("last_seen", 0) < cutoff and sid != session_id:
+                del active[sid]
+                try: (TIMELINE / f"{timeline_mod.safe_sid(sid)}.ndjson").unlink()
+                except Exception: pass
+        rec = active.setdefault(session_id, {})
+        now = time.time()
+        rec.setdefault("first_seen", now)
+        rec["last_seen"] = now
+        if cwd: rec["cwd"] = cwd
+        rec["preset_resolved"] = resolved_preset
+        rec["preset_source"] = source
+        if event_name == "SessionEnd":
+            rec["ended"] = True
+    try: stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
     except Exception as e: log(f"sessions write: {e}")
 
 # ---------- sample selection + playback ----------
@@ -262,7 +263,12 @@ def list_samples(preset_name, voice_dir):
     call it per note — caching avoids re-scanning the directory every note.
     Keyed on dir mtime so adding/removing samples invalidates; a regen that
     rewrites same-named WAVs keeps paths valid (audio reads content at play time)."""
-    d = PRESETS / preset_name / "samples" / voice_dir
+    base = (PRESETS / preset_name / "samples").resolve()
+    try:
+        d = (base / str(voice_dir)).resolve()
+        d.relative_to(base)
+    except (OSError, ValueError):
+        return []
     try:
         mtime = d.stat().st_mtime
     except OSError:
@@ -418,15 +424,10 @@ def _melody_state_file(preset_name, voice):
     return preset_state_dir(preset_name) / f"melody-{voice}.json"
 
 def _load_state(p):
-    try:
-        if p.exists(): return json.loads(p.read_text())
-    except Exception: pass
-    return {}
+    return stateio.load_json(p, {})
 
 def _save_state(p, d):
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(d))
-    tmp.rename(p)
+    stateio.save_json(p, d, indent=None, newline=False)
 
 def _nearest_pitched(pitched, target_midi):
     """pitched = [(midi, path), ...]; return (path, semitone_shift) for the
@@ -532,100 +533,88 @@ def melodic_pick(preset_name, voice, voice_dir, song_name=None,
             return _nearest_pitched(pitched, int(target))
 
     state_file = _melody_state_file(preset_name, voice)
-    state = _load_state(state_file)
+    # The selection and state advance are one transaction.  Without holding
+    # the lock across both, simultaneous hooks can choose the same bag entry
+    # and overwrite each other's phrase history even with atomic file writes.
+    with stateio.edit_json(state_file, {}, indent=None, newline=False) as state:
+        # Tonal-overlay mode for unpitched voices: a noise-burst voice (wood,
+        # bird, mokugyo) opts in by setting `tonal_anchor_midi` in preset.json.
+        if not pitched and tonal_anchor is not None and scale_pitches:
+            anchor = int(tonal_anchor)
+            rng = int(tonal_range) if tonal_range else 12
+            candidates = [p for p in scale_pitches if abs(int(p) - anchor) <= rng]
+            if not candidates:
+                candidates = list(scale_pitches)
+            bag = state.get("bag", [])
+            if not bag or any(b >= len(samples) for b in bag):
+                bag = list(range(len(samples)))
+                random.shuffle(bag)
+            sample_idx = bag[0]
+            target, mstate = _markov_pitch(candidates, state, weight_table, roots)
+            state.clear()
+            state.update({"bag": bag[1:], **mstate})
+            return samples[sample_idx], target - anchor
 
-    # Tonal-overlay mode for unpitched voices: a noise-burst voice (wood,
-    # bird, mokugyo) opts in by setting `tonal_anchor_midi` in preset.json
-    # AND the preset declares `scale_pitches`. We bag-pick a sample, Markov-
-    # pick a target pitch from scale_pitches, and shift via afplay -r so the
-    # noise burst rings at that scale degree. Cheap way to make every sound
-    # in the system land on the key without re-rendering.
-    if not pitched and tonal_anchor is not None and scale_pitches:
-        # Clamp candidates to within tonal_range semitones of anchor so
-        # noise-burst voices don't get shifted by ±24 (which would warp the
-        # rendered duration and timbre too aggressively).
-        anchor = int(tonal_anchor)
-        rng = int(tonal_range) if tonal_range else 12
-        candidates = [p for p in scale_pitches if abs(int(p) - anchor) <= rng]
-        if not candidates:
-            candidates = list(scale_pitches)  # safety: at least pick something
+        # Unpitched voice without tonal-overlay (cluster, sparkle, bloom, etc.).
+        if not pitched:
+            bag = state.get("bag", [])
+            if not bag or any(b >= len(samples) for b in bag):
+                bag = list(range(len(samples)))
+                random.shuffle(bag)
+            chosen = bag[0]
+            state.clear()
+            state["bag"] = bag[1:]
+            return samples[chosen], 0
+
+        # Pitched voice — Markov-weighted pick from the shuffled bag.
+        last = state.get("last_pitches", [])
         bag = state.get("bag", [])
-        if not bag or any(b >= len(samples) for b in bag):
-            bag = list(range(len(samples)))
+        phrase = state.get("phrase_count", 0)
+        if not bag or any(b >= len(pitched) for b in bag):
+            bag = list(range(len(pitched)))
             random.shuffle(bag)
-        sample_idx = bag[0]
-        target, mstate = _markov_pitch(candidates, state, weight_table, roots)
-        new_state = {"bag": bag[1:], **mstate}
-        _save_state(state_file, new_state)
-        shift = target - anchor
-        return samples[sample_idx], shift
 
-    # Unpitched voice without tonal-overlay (cluster, sparkle, bloom, swell, breath etc.)
-    if not pitched:
-        bag = state.get("bag", [])
-        if not bag or any(b >= len(samples) for b in bag):
-            bag = list(range(len(samples)))
-            random.shuffle(bag)
-        chosen = bag[0]
-        _save_state(state_file, {"bag": bag[1:]})
-        return samples[chosen], 0
+        weights = []
+        for idx in bag:
+            midi, _ = pitched[idx]
+            w = 1.0
+            for i, recent in enumerate(reversed(last[-3:])):
+                if midi == recent:
+                    w *= (0.05, 0.30, 0.55)[min(i, 2)]
+            if last:
+                w *= _interval_weight(last[-1], midi, weight_table)
+            if phrase >= 6:
+                pc = midi % 12
+                if len(roots) > 0 and pc == roots[0]: w *= 2.5
+                elif len(roots) > 1 and pc == roots[1]: w *= 2.0
+                elif len(roots) > 2 and pc == roots[2]: w *= 1.6
+            weights.append(w)
 
-    # Pitched voice — Markov-weighted pick from the shuffled bag
-    last = state.get("last_pitches", [])
-    bag = state.get("bag", [])
-    phrase = state.get("phrase_count", 0)
+        total = sum(weights)
+        if total <= 0:
+            chosen_bag_idx = random.randrange(len(bag))
+        else:
+            r = random.random() * total
+            acc = 0.0
+            chosen_bag_idx = len(bag) - 1
+            for i, w in enumerate(weights):
+                acc += w
+                if acc >= r:
+                    chosen_bag_idx = i
+                    break
 
-    if not bag or any(b >= len(pitched) for b in bag):
-        bag = list(range(len(pitched)))
-        random.shuffle(bag)
-
-    weights = []
-    for idx in bag:
-        midi, _ = pitched[idx]
-        w = 1.0
-        # Penalize recent repeats (last 3 most strongly)
-        for i, recent in enumerate(reversed(last[-3:])):
-            if midi == recent:
-                w *= (0.05, 0.30, 0.55)[min(i, 2)]
-        # Interval shape from immediately previous note
-        if last:
-            w *= _interval_weight(last[-1], midi, weight_table)
-        # Phrase landing: every ~7 notes, gravity pulls to the preset's roots.
-        # Default A and E; per-preset roots override (e.g., E Phrygian → [4, 11]).
-        if phrase >= 6:
-            pc = midi % 12
-            if len(roots) > 0 and pc == roots[0]: w *= 2.5
-            elif len(roots) > 1 and pc == roots[1]: w *= 2.0
-            elif len(roots) > 2 and pc == roots[2]: w *= 1.6
-        weights.append(w)
-
-    total = sum(weights)
-    if total <= 0:
-        chosen_bag_idx = random.randrange(len(bag))
-    else:
-        r = random.random() * total
-        acc = 0.0
-        chosen_bag_idx = len(bag) - 1
-        for i, w in enumerate(weights):
-            acc += w
-            if acc >= r:
-                chosen_bag_idx = i
-                break
-
-    sample_idx = bag[chosen_bag_idx]
-    midi, sample = pitched[sample_idx]
-
-    new_bag = bag[:chosen_bag_idx] + bag[chosen_bag_idx+1:]
-    new_last = (last + [midi])[-4:]
-    landed = (phrase >= 6) and (midi % 12 in roots)
-    new_phrase = 0 if landed else phrase + 1
-
-    _save_state(state_file, {
-        "last_pitches": new_last,
-        "bag": new_bag,
-        "phrase_count": new_phrase,
-    })
-    return sample, 0
+        sample_idx = bag[chosen_bag_idx]
+        midi, sample = pitched[sample_idx]
+        new_bag = bag[:chosen_bag_idx] + bag[chosen_bag_idx+1:]
+        new_last = (last + [midi])[-4:]
+        landed = (phrase >= 6) and (midi % 12 in roots)
+        state.clear()
+        state.update({
+            "last_pitches": new_last,
+            "bag": new_bag,
+            "phrase_count": 0 if landed else phrase + 1,
+        })
+        return sample, 0
 
 # Backward-compat alias — older code paths may still reference round_robin_pick
 def round_robin_pick(preset_name, voice, voice_dir):
@@ -635,20 +624,23 @@ def check_mioi(preset_name, voice, mioi_s):
     sd = preset_state_dir(preset_name)
     last_file = sd / f"last-{voice}.txt"
     pressure_file = sd / f"pressure-{voice}.txt"
-    now = time.time()
-    try: last = float(last_file.read_text().strip())
-    except Exception: last = 0.0
-    if now - last < mioi_s:
+    # Serialize the timestamp + pressure pair: these are one logical state
+    # transition and hooks for the same voice routinely overlap.
+    with stateio.file_lock(last_file, timeout=1.0):
+        now = time.time()
+        try: last = float(last_file.read_text().strip())
+        except Exception: last = 0.0
+        if now - last < mioi_s:
+            try: p = int(pressure_file.read_text().strip())
+            except Exception: p = 0
+            pressure_file.write_text(str(p + 1))
+            return False, 0.0
         try: p = int(pressure_file.read_text().strip())
         except Exception: p = 0
-        pressure_file.write_text(str(p + 1))
-        return False, 0.0
-    try: p = int(pressure_file.read_text().strip())
-    except Exception: p = 0
-    pressure_file.write_text("0")
-    last_file.write_text(str(now))
-    pressure_db = min(3.0, 0.5 * p)
-    return True, pressure_db
+        pressure_file.write_text("0")
+        last_file.write_text(str(now))
+        pressure_db = min(3.0, 0.5 * p)
+        return True, pressure_db
 
 def play(sample_path, gain_linear, shift_semitones=0, delay_s=0.0,
           rate_jitter=False, echo=None):
@@ -753,12 +745,22 @@ def is_failure(payload):
         return True
     return False
 
+def mapping_event_name(event_name):
+    """Reuse the existing PostToolUse mapping for Claude's failure event.
+
+    Current Claude Code emits PostToolUse only after success and emits
+    PostToolUseFailure separately.  Presets predate that split and already
+    carry an ``on_failure`` override under PostToolUse, so preserve the preset
+    format while accepting the current hook surface.
+    """
+    return "PostToolUse" if event_name == "PostToolUseFailure" else event_name
+
 def resolve_voice(preset, event_name, payload):
     events = preset.get("events", {})
-    spec = events.get(event_name)
+    spec = events.get(mapping_event_name(event_name))
     if not spec:
         return None
-    if event_name == "PostToolUse" and is_failure(payload):
+    if event_name == "PostToolUseFailure" or (event_name == "PostToolUse" and is_failure(payload)):
         return spec.get("on_failure") or spec.get("default")
     tool = payload.get("tool_name", "")
     by_tool = spec.get("by_tool") or {}
@@ -812,14 +814,15 @@ def handle(payload):
     # event TYPE fires (mirrors the per-voice last-<voice>.txt). Written on
     # every handled event, even if it maps to silence, so unmapped events
     # still light up and can be mapped.
+    activity_event = mapping_event_name(event)
     try:
         _ed = STATE / preset_name
         _ed.mkdir(parents=True, exist_ok=True)
-        (_ed / f"evt-{event}.txt").write_text(str(time.time()))
+        (_ed / f"evt-{activity_event}.txt").write_text(str(time.time()))
         # Frequency counter: append one byte so the file SIZE == fire count.
         # O_APPEND of a single byte is atomic, so concurrent hook processes
         # never clobber each other (a read-modify-write counts.json would).
-        with (_ed / f"cnt-{event}.bin").open("ab") as _cf:
+        with (_ed / f"cnt-{activity_event}.bin").open("ab") as _cf:
             _cf.write(b"\x01")
     except Exception:
         pass
@@ -851,7 +854,7 @@ def handle(payload):
 
     # Per-event effect block: preset.json events.<name> may carry an
     # `effect: {delay: {ms, feedback, count}}` block, applied at trigger time.
-    spec = preset.get("events", {}).get(event, {}) if isinstance(preset.get("events"), dict) else {}
+    spec = preset.get("events", {}).get(mapping_event_name(event), {}) if isinstance(preset.get("events"), dict) else {}
     event_effect = spec.get("effect") if isinstance(spec, dict) else None
 
     voice = resolve_voice(preset, event, payload)

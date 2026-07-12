@@ -35,6 +35,7 @@ except ImportError:
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import audio  # noqa: E402  (cross-platform playback + process helpers)
+import stateio  # noqa: E402
 PRESETS = HERE / "presets"
 STATE = HERE / "state"
 CONFIG = HERE / "config.json"
@@ -42,13 +43,10 @@ SESSIONS_FILE = STATE / "sessions.json"
 EVENT_PY = HERE / "event.py"
 
 def load_json(p, default):
-    try: return json.loads(p.read_text()) if p.exists() else default
-    except Exception: return default
+    return stateio.load_json(p, default)
 
 def save_json(p, d):
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(d, indent=2) + "\n")
-    tmp.rename(p)
+    stateio.save_json(p, d)
 
 def list_preset_names():
     if not PRESETS.exists(): return []
@@ -612,15 +610,14 @@ class TuneUI:
         try: idx = choices.index(cur)
         except ValueError: idx = 0
         new = choices[(idx + delta) % len(choices)]
-        d = load_json(SESSIONS_FILE, {"active": {}})
-        if sid in d.get("active", {}):
+        def mutate(d):
+            if sid not in d.get("active", {}): return
             if new is None:
                 d["active"][sid].pop("preset_pinned", None)
-                self.status(f"unpinned {sid[:8]}")
             else:
                 d["active"][sid]["preset_pinned"] = new
-                self.status(f"pinned {sid[:8]} → {new}")
-            save_json(SESSIONS_FILE, d)
+        stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
+        self.status(f"unpinned {sid[:8]}" if new is None else f"pinned {sid[:8]} → {new}")
 
     def cycle_preset(self):
         names = list_preset_names()

@@ -20,6 +20,7 @@ Pure stdlib — small SMF parser inside, no external deps.
 """
 import json, struct, time
 from pathlib import Path
+import stateio
 
 HERE = Path(__file__).resolve().parent
 SONGS = HERE / "songs"
@@ -30,19 +31,11 @@ CONFIG = HERE / "config.json"
 # ---------- atomic JSON ----------
 
 def _load(p, default):
-    try:
-        if p.exists():
-            return json.loads(p.read_text())
-    except Exception:
-        pass
-    return default
+    return stateio.load_json(p, default)
 
 
 def _save(p, d):
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(d, indent=2))
-    tmp.rename(p)
+    stateio.save_json(p, d, indent=2, newline=False)
 
 
 # ---------- SMF parser (Type 0/1, ticks-per-quarter only) ----------
@@ -213,16 +206,16 @@ def global_song():
 def set_global(name):
     if not has_song(name):
         return False
-    s = _state()
-    s["global"] = name
-    _set(s)
+    def mutate(s):
+        s["global"] = name
+    stateio.update_json(STATE_FILE, {}, mutate)
     return True
 
 
 def disable_global():
-    s = _state()
-    s.pop("global", None)
-    _set(s)
+    def mutate(s):
+        s.pop("global", None)
+    stateio.update_json(STATE_FILE, {}, mutate)
 
 
 def position(name):
@@ -230,9 +223,9 @@ def position(name):
 
 
 def set_position(name, pos):
-    s = _state()
-    s.setdefault("positions", {})[name] = int(pos)
-    _set(s)
+    def mutate(s):
+        s.setdefault("positions", {})[name] = int(pos)
+    stateio.update_json(STATE_FILE, {}, mutate)
 
 
 def reset_position(name):
@@ -247,15 +240,15 @@ def get_channel(name):
 
 def set_channel(name, channel):
     """channel: int | 'all' | 'lead' (auto) | None (clear)."""
-    s = _state()
-    chmap = s.setdefault("channel", {})
-    if channel is None or channel == "lead":
-        chmap.pop(name, None)
-    elif channel == "all":
-        chmap[name] = "all"
-    else:
-        chmap[name] = int(channel)
-    _set(s)
+    def mutate(s):
+        chmap = s.setdefault("channel", {})
+        if channel is None or channel == "lead":
+            chmap.pop(name, None)
+        elif channel == "all":
+            chmap[name] = "all"
+        else:
+            chmap[name] = int(channel)
+    stateio.update_json(STATE_FILE, {}, mutate)
 
 
 def _filter_notes(song, channel):
@@ -279,13 +272,22 @@ def next_note(name):
     None if no song is active or song has no notes after channel filter."""
     if not name:
         return None
-    notes = notes_for(name)
-    if not notes:
+    song = load_song(name)
+    if not song:
         return None
-    pos = position(name)
-    note = notes[pos % len(notes)]
-    set_position(name, (pos + 1) % len(notes))
-    return int(note["midi"])
+    result = {"note": None}
+    def mutate(s):
+        configured = s.get("channel", {}).get(name)
+        channel = lead_channel(song) if configured is None else configured
+        notes = _filter_notes(song, channel)
+        if not notes:
+            return
+        positions = s.setdefault("positions", {})
+        pos = int(positions.get(name, 0))
+        result["note"] = int(notes[pos % len(notes)]["midi"])
+        positions[name] = (pos + 1) % len(notes)
+    stateio.update_json(STATE_FILE, {}, mutate)
+    return result["note"]
 
 
 # ---------- quantization ----------
@@ -305,14 +307,16 @@ def quant_settings():
 
 
 def set_quant(enabled=None, bpm=None, grid=None):
-    cfg = _load(CONFIG, {})
+    def mutate(cfg):
+        q = cfg.get("quant") or {}
+        if enabled is not None: q["enabled"] = bool(enabled)
+        if bpm is not None:     q["bpm"] = max(20.0, min(300.0, float(bpm)))
+        if grid is not None:    q["grid"] = max(0.0625, min(4.0, float(grid)))
+        cfg["quant"] = q
+    cfg = stateio.update_json(CONFIG, {}, mutate)
     q = cfg.get("quant") or {}
-    if enabled is not None: q["enabled"] = bool(enabled)
-    if bpm is not None:     q["bpm"] = max(20.0, min(300.0, float(bpm)))
-    if grid is not None:    q["grid"] = max(0.0625, min(4.0, float(grid)))
-    cfg["quant"] = q
-    _save(CONFIG, cfg)
-    return quant_settings()
+    return {"enabled": bool(q.get("enabled", False)), "bpm": float(q.get("bpm", 120.0)),
+            "grid": float(q.get("grid", 0.5))}
 
 
 def quant_delay():

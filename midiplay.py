@@ -31,6 +31,7 @@ sys.path.insert(0, str(HERE))
 import event as ev          # noqa: E402  sample selection + play() + recording capture
 import song as song_mod     # noqa: E402  SMF parser + song library
 import timeline as tl       # noqa: E402  session timeline reader (replay source)
+import stateio              # noqa: E402
 
 STATE = HERE / "state"
 PLAY_DIR = STATE / "midiplay"
@@ -55,19 +56,11 @@ _BURST_MAX = 18
 # ---------- atomic json ----------
 
 def _save(p, d):
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(d))
-    tmp.rename(p)
+    stateio.save_json(p, d, indent=None, newline=False)
 
 
 def _load(p, default=None):
-    try:
-        if p.exists():
-            return json.loads(p.read_text())
-    except Exception:
-        pass
-    return default
+    return stateio.load_json(p, default)
 
 
 # ---------- mapping: MIDI channels → event types → preset voices ----------

@@ -2,6 +2,9 @@
 'use strict';
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = (value) => String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[ch]));
 const api = {
   get: (u) => fetch(u).then(r => r.json()),
   post: (u, b) => fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) }).then(r => r.json()),
@@ -77,8 +80,8 @@ function renderRail() {
     const el = document.createElement('div');
     el.className = 'srail-item' + (recent ? ' recent' : '') + (focused ? ' focused' : '');
     el.dataset.session = s.id;
-    el.innerHTML = `<div class="si-top"><span class="si-dot"></span><span class="si-name" title="${s.cwd || s.id}">${s.base}</span><span class="si-age">${ageLabel(s.age)}</span></div>
-      <div class="si-preset">${s.preset || '—'} <span class="via">via ${s.source}</span></div>
+    el.innerHTML = `<div class="si-top"><span class="si-dot"></span><span class="si-name" title="${esc(s.cwd || s.id)}">${esc(s.base)}</span><span class="si-age">${ageLabel(s.age)}</span></div>
+      <div class="si-preset">${esc(s.preset || '—')} <span class="via">via ${esc(s.source)}</span></div>
       ${badges ? `<div class="si-badges">${badges}</div>` : ''}
       ${railTrackHTML(s)}`;
     el.onclick = () => setFocus({ kind: 'session', id: s.id, s });
@@ -96,14 +99,14 @@ function railTrackHTML(s) {
   const peak = t.peak || 1;
   const bars = t.density.map(v => `<i style="height:${Math.max(8, Math.round(v / peak * 100))}%;opacity:${(0.3 + 0.7 * v / peak).toFixed(2)}"></i>`).join('');
   return `<div class="si-track" title="${t.count} events over ${Math.round(t.duration)}s — click ▶ to replay this session">
-      <button class="si-replay" data-id="${s.id}" title="Replay this session through ${s.preset || 'the preset'}">▶</button>
+      <button class="si-replay" data-id="${esc(s.id)}" title="Replay this session through ${esc(s.preset || 'the preset')}">▶</button>
       <div class="si-spark">${bars}<span class="si-head" hidden></span></div>
       <span class="si-evts">${t.count}</span>
     </div>`;
 }
 function toggleReplay(s) {
   if (REPLAY.active && REPLAY.session === s.id) { api.post('/api/score/stop', {}); toast('replay stopped'); }
-  else { api.post('/api/score/replay', { id: s.id, preset: s.preset || STATE.active }); toast(`▶ replaying <span class="g">${s.base}</span> through ${s.preset || STATE.active}`); }
+  else { api.post('/api/score/replay', { id: s.id, preset: s.preset || STATE.active }); toast(`▶ replaying <span class="g">${esc(s.base)}</span> through ${esc(s.preset || STATE.active)}`); }
 }
 /* live: reflect replay state on the rail (button + playhead) without re-rendering */
 function paintReplay() {
@@ -202,28 +205,28 @@ function renderSessionStrip() {
   // preset chip → opens browser
   const chip = document.createElement('div'); chip.className = 'ss-field';
   chip.innerHTML = `<label>${FOCUS.kind === 'global' ? 'default preset' : 'session preset'}</label>
-    <div class="preset-chip" id="presetChip"><span class="pc-name">${DETAIL.name}</span><span class="pc-ico">⊞ change</span></div>`;
+    <div class="preset-chip" id="presetChip"><span class="pc-name">${esc(DETAIL.name)}</span><span class="pc-ico">⊞ change</span></div>`;
   chip.querySelector('#presetChip').onclick = openBrowser;
   strip.appendChild(chip);
 
   if (FOCUS.kind === 'session' && FOCUS.s) {
     const s = FOCUS.s;
     const scaleOpts = `<option value="__none__"${!s.scale ? ' selected' : ''}>default</option>` +
-      (m.scales || []).map(x => `<option ${x === s.scale ? 'selected' : ''}>${x}</option>`).join('');
+      (m.scales || []).map(x => `<option ${x === s.scale ? 'selected' : ''}>${esc(x)}</option>`).join('');
     const songOpts = `<option value="__none__"${!s.song ? ' selected' : ''}>off</option>` +
-      (m.songs || []).map(x => `<option ${x === s.song ? 'selected' : ''}>${x}</option>`).join('');
+      (m.songs || []).map(x => `<option ${x === s.song ? 'selected' : ''}>${esc(x)}</option>`).join('');
     const sc = document.createElement('div'); sc.className = 'ss-field';
     sc.innerHTML = `<label>scale</label><select class="vsel ${s.scale ? '' : 'silent'}" id="ssScale">${scaleOpts}</select>`;
-    sc.querySelector('#ssScale').onchange = e => { api.post('/api/session/scale', { id: s.id, scale: e.target.value === '__none__' ? null : e.target.value }); s.scale = e.target.value === '__none__' ? null : e.target.value; e.target.classList.toggle('silent', !s.scale); toast(`${s.base} scale → ${s.scale || 'default'}`); renderRail(); };
+    sc.querySelector('#ssScale').onchange = e => { api.post('/api/session/scale', { id: s.id, scale: e.target.value === '__none__' ? null : e.target.value }); s.scale = e.target.value === '__none__' ? null : e.target.value; e.target.classList.toggle('silent', !s.scale); toast(`${esc(s.base)} scale → ${esc(s.scale || 'default')}`); renderRail(); };
     strip.appendChild(sc);
     const sg = document.createElement('div'); sg.className = 'ss-field';
     sg.innerHTML = `<label>song</label><select class="vsel ${s.song ? '' : 'silent'}" id="ssSong">${songOpts}</select>`;
-    sg.querySelector('#ssSong').onchange = e => { api.post('/api/session/song', { id: s.id, song: e.target.value === '__none__' ? null : e.target.value }); s.song = e.target.value === '__none__' ? null : e.target.value; e.target.classList.toggle('silent', !s.song); toast(`${s.base} song → ${s.song || 'off'}`); renderRail(); };
+    sg.querySelector('#ssSong').onchange = e => { api.post('/api/session/song', { id: s.id, song: e.target.value === '__none__' ? null : e.target.value }); s.song = e.target.value === '__none__' ? null : e.target.value; e.target.classList.toggle('silent', !s.song); toast(`${esc(s.base)} song → ${esc(s.song || 'off')}`); renderRail(); };
     strip.appendChild(sg);
     if (s.pinned) {
       const un = document.createElement('div'); un.className = 'ss-field';
       un.innerHTML = `<label>&nbsp;</label><button class="btn ghost sm" id="ssUnpin">📌 unpin</button>`;
-      un.querySelector('#ssUnpin').onclick = async () => { await api.post('/api/session/pin', { id: s.id, preset: '__none__' }); s.pinned = null; toast(`${s.base} follows rules`); renderRail(); renderSessionStrip(); };
+      un.querySelector('#ssUnpin').onclick = async () => { await api.post('/api/session/pin', { id: s.id, preset: '__none__' }); s.pinned = null; toast(`${esc(s.base)} follows rules`); renderRail(); renderSessionStrip(); };
       strip.appendChild(un);
     }
     // mini-track: replay / render-to-WAV / export this session's timeline
@@ -238,8 +241,8 @@ function renderSessionStrip() {
           <button class="ss-trk-btn" id="mtExport" title="Save a tiny .score.json you can share + replay anywhere">⤓ score</button>
         </div>`;
       mt.querySelector('#mtReplay').onclick = () => toggleReplay(s);
-      mt.querySelector('#mtRender').onclick = () => { api.post('/api/score/replay', { id: s.id, preset: s.preset || STATE.active, render: true }); toast(`● rendering <span class="g">${s.base}</span> → recordings/`); };
-      mt.querySelector('#mtExport').onclick = async () => { const r = await api.post('/api/score/export', { id: s.id, label: s.base }); toast(r && r.ok ? `⤓ saved <span class="g">${r.name}.score.json</span>` : 'export failed'); };
+      mt.querySelector('#mtRender').onclick = () => { api.post('/api/score/replay', { id: s.id, preset: s.preset || STATE.active, render: true }); toast(`● rendering <span class="g">${esc(s.base)}</span> → recordings/`); };
+      mt.querySelector('#mtExport').onclick = async () => { const r = await api.post('/api/score/export', { id: s.id, label: s.base }); toast(r && r.ok ? `⤓ saved <span class="g">${esc(r.name)}.score.json</span>` : 'export failed'); };
       strip.appendChild(mt);
     }
   }
@@ -267,7 +270,7 @@ async function refreshPresetsState() {
 async function deletePreset(name) {
   if (!confirm(`Delete the custom preset “${name}”? This removes its sounds for good.`)) return;
   const r = await api.post('/api/preset/delete', { name });
-  if (!r.ok) { toast(r.msg || 'could not delete'); return; }
+  if (!r.ok) { toast(esc(r.msg || 'could not delete')); return; }
   const wasEditing = editPreset() === name;
   await refreshPresetsState();
   if (wasEditing) setFocus({ kind: 'global' });
@@ -279,7 +282,7 @@ async function renamePreset(name) {
   if (to == null) return;
   const wasEditing = editPreset() === name;
   const r = await api.post('/api/preset/rename', { name, to });
-  if (!r.ok) { toast(r.msg || 'could not rename'); return; }
+  if (!r.ok) { toast(esc(r.msg || 'could not rename')); return; }
   await refreshPresetsState();
   if (wasEditing) setFocus({ kind: 'global' });
   renderBrowser($('#browserSearch').value);
@@ -313,11 +316,11 @@ function renderSwapPalette(filter) {
     const voices = grp.voices.filter(v => !f || v.voice.toLowerCase().includes(f) || grp.preset.includes(f));
     if (!voices.length) return;
     const sec = document.createElement('div'); sec.className = 'b-grp';
-    sec.innerHTML = `<div class="b-grp-h">${grp.preset}</div>`;
+    sec.innerHTML = `<div class="b-grp-h">${esc(grp.preset)}</div>`;
     const row = document.createElement('div'); row.className = 'b-chips';
     voices.forEach(v => {
       const chip = document.createElement('div'); chip.className = 'b-chip';
-      chip.innerHTML = `<button class="b-play" title="hear it">▶</button><span class="b-vn">${v.voice}</span><button class="b-use" title="use this sound">use</button>`;
+      chip.innerHTML = `<button class="b-play" title="hear it">▶</button><span class="b-vn">${esc(v.voice)}</span><button class="b-use" title="use this sound">use</button>`;
       chip.querySelector('.b-play').onclick = () => api.post('/api/voice/play', { preset: grp.preset, voice: v.voice });
       chip.querySelector('.b-use').onclick = () => { if (PICKCB) PICKCB(grp.preset, v.voice); };
       row.appendChild(chip);
@@ -329,11 +332,11 @@ async function doSwap(sp, sv) {
   if (!SWAP) return;
   const target = SWAP;
   const r = await api.post('/api/voice/swap', { preset: target.preset, voice: target.voice, src_preset: sp, src_voice: sv });
-  if (!r.ok) { toast(r.msg || 'swap failed'); return; }
+  if (!r.ok) { toast(esc(r.msg || 'swap failed')); return; }
   closeSwap();
   await loadFocus();
   api.post('/api/voice/play', { preset: target.preset, voice: target.voice });
-  toast(`<span class="g">${target.voice}</span> now sounds like ${sp}/${sv}`);
+  toast(`<span class="g">${esc(target.voice)}</span> now sounds like ${esc(sp)}/${esc(sv)}`);
 }
 
 /* ---------------- preset builder ---------------- */
@@ -345,7 +348,7 @@ async function openBuilder() {
   bPicks = []; bMode = 'blank'; $('#bName').value = '';
   $$('.b-seg').forEach(s => s.classList.toggle('on', s.dataset.mode === 'blank'));
   const dup = $('#bDupSel'); dup.hidden = true;
-  dup.innerHTML = (STATE.presets || []).map(p => `<option>${p.name}</option>`).join('');
+  dup.innerHTML = (STATE.presets || []).map(p => `<option>${esc(p.name)}</option>`).join('');
   if (!BANK) { try { BANK = (await api.get('/api/palette')).palette; } catch (e) { BANK = []; } }
   $('#bSearch').value = '';
   renderPalette(''); renderBuilderSel();
@@ -359,13 +362,13 @@ function renderPalette(filter) {
     const voices = grp.voices.filter(v => !f || v.voice.toLowerCase().includes(f) || grp.preset.includes(f));
     if (!voices.length) return;
     const sec = document.createElement('div'); sec.className = 'b-grp';
-    sec.innerHTML = `<div class="b-grp-h">${grp.preset}</div>`;
+    sec.innerHTML = `<div class="b-grp-h">${esc(grp.preset)}</div>`;
     const row = document.createElement('div'); row.className = 'b-chips';
     voices.forEach(v => {
       const key = pkKey(grp.preset, v.voice);
       const picked = bPicks.some(p => p.key === key);
       const chip = document.createElement('div'); chip.className = 'b-chip' + (picked ? ' picked' : ''); chip.dataset.pk = key;
-      chip.innerHTML = `<button class="b-play" title="hear it">▶</button><span class="b-vn">${v.voice}</span><button class="b-add">${picked ? '✓' : '+'}</button>`;
+      chip.innerHTML = `<button class="b-play" title="hear it">▶</button><span class="b-vn">${esc(v.voice)}</span><button class="b-add">${picked ? '✓' : '+'}</button>`;
       chip.querySelector('.b-play').onclick = () => { api.post('/api/voice/play', { preset: grp.preset, voice: v.voice }); toast(`<span class="g">${grp.preset}</span> · ${v.voice}`); };
       chip.querySelector('.b-add').onclick = () => { togglePick(grp.preset, v.voice); };
       row.appendChild(chip);
@@ -384,10 +387,10 @@ function togglePick(sp, sv) {
 }
 function renderBuilderSel() {
   const el = $('#bSel');
-  const dupNote = bMode === 'dup' ? `<span class="b-sel-note">+ all of <b>${$('#bDupSel').value}</b>'s voices</span>` : '';
+  const dupNote = bMode === 'dup' ? `<span class="b-sel-note">+ all of <b>${esc($('#bDupSel').value)}</b>'s voices</span>` : '';
   if (!bPicks.length && bMode !== 'dup') { el.innerHTML = `<span class="b-sel-empty">no sounds yet — tap <b>+</b> on any sound below to add it</span>`; return; }
   el.innerHTML = `<span class="b-sel-lbl">your sounds (${bPicks.length})</span>` +
-    bPicks.map(p => `<span class="b-sel-chip" data-key="${p.key}">${p.src_voice}<small>${p.src_preset}</small><button class="b-x">✕</button></span>`).join('') + dupNote;
+    bPicks.map(p => `<span class="b-sel-chip" data-key="${esc(p.key)}">${esc(p.src_voice)}<small>${esc(p.src_preset)}</small><button class="b-x">✕</button></span>`).join('') + dupNote;
   el.querySelectorAll('.b-sel-chip').forEach(c => c.querySelector('.b-x').onclick = () => {
     const p = bPicks.find(x => x.key === c.dataset.key); if (p) togglePick(p.src_preset, p.src_voice);
   });
@@ -401,12 +404,12 @@ async function builderCreate() {
   const btn = $('#bCreate'); btn.disabled = true; btn.textContent = 'building…';
   const r = await api.post('/api/preset/create', body);
   btn.disabled = false; btn.textContent = 'Create →';
-  if (!r.ok) { toast(r.msg || 'could not create'); return; }
+  if (!r.ok) { toast(esc(r.msg || 'could not create')); return; }
   closeBuilder();
   const s = await api.get('/api/state'); STATE.presets = s.presets; STATE.active = s.active;
   $('#npName').textContent = s.active;
   setFocus({ kind: 'global' });
-  toast(`built <span class="g">${r.name}</span> · ${r.voices.length} voices — now playing`);
+  toast(`built <span class="g">${esc(r.name)}</span> · ${r.voices.length} voices — now playing`);
 }
 
 /* ---------------- tip / buy-me-a-coffee ---------------- */
@@ -460,7 +463,7 @@ function renderRecBody(s) {
     body.querySelector('#recDrone').onclick = () => { recDrone = !recDrone; renderRecBody(s); };
     body.querySelector('#recGo').onclick = async () => {
       const r = await api.post('/api/record/start', { seconds: recPick, drone: recDrone });
-      if (r && r.ok === false) { toast(r.msg || 'already recording'); }
+      if (r && r.ok === false) { toast(esc(r.msg || 'already recording')); }
       else { toast(`<span class="g">recording</span> ${recPick}s — go make some sounds`); }
       setTimeout(refreshRec, 500);
     };
@@ -480,16 +483,16 @@ function renderRecList(s) {
   let html = Object.keys(byBase).length ? '<div class="rec-list-h">Your clips</div>' + Object.entries(byBase).map(([base, items]) => {
     const m4a = items.find(i => i.name.endsWith('.m4a')); const wav = items.find(i => i.name.endsWith('.wav'));
     const play = m4a || wav;
-    const dls = items.map(i => `<a class="rec-dl" href="${i.url}" download>${i.name.endsWith('.m4a') ? 'm4a' : 'wav'} ↓</a>`).join('');
-    return `<div class="rec-row"><div class="rec-name">${base}</div>
-      ${play ? `<audio class="rec-audio" controls preload="none" src="${play.url}"></audio>` : ''}
+    const dls = items.map(i => `<a class="rec-dl" href="${esc(i.url)}" download>${i.name.endsWith('.m4a') ? 'm4a' : 'wav'} ↓</a>`).join('');
+    return `<div class="rec-row"><div class="rec-name">${esc(base)}</div>
+      ${play ? `<audio class="rec-audio" controls preload="none" src="${esc(play.url)}"></audio>` : ''}
       <div class="rec-dls">${dls}</div></div>`;
   }).join('') : '';
   // session-score exports: tiny, replay-anywhere — download only (not audio)
   if (scores.length) {
     html += '<div class="rec-list-h">Session scores <span class="rec-list-note">tiny · replay anywhere</span></div>' +
-      scores.map(r => `<div class="rec-row"><div class="rec-name">🎬 ${r.name.replace(/\.score\.json$/, '')}</div>
-        <div class="rec-dls"><a class="rec-dl" href="${r.url}" download>score.json ↓ (${Math.max(1, Math.round(r.size / 1024))} KB)</a></div></div>`).join('');
+      scores.map(r => `<div class="rec-row"><div class="rec-name">🎬 ${esc(r.name.replace(/\.score\.json$/, ''))}</div>
+        <div class="rec-dls"><a class="rec-dl" href="${esc(r.url)}" download>score.json ↓ (${Math.max(1, Math.round(r.size / 1024))} KB)</a></div></div>`).join('');
   }
   list.innerHTML = html;
 }
@@ -596,7 +599,7 @@ async function enterJuke() {
   if (!JUKE.preset || !(STATE.presets || []).some(p => p.name === JUKE.preset)) JUKE.preset = STATE.active;
   const kit = $('#jukeKit');
   kit.innerHTML = (STATE.presets || []).map(p =>
-    `<option value="${p.name}" ${p.name === JUKE.preset ? 'selected' : ''}>${p.name}${p.name === 'studio' ? ' · 🥁 drums/bass/synth' : ''}</option>`).join('');
+    `<option value="${esc(p.name)}" ${p.name === JUKE.preset ? 'selected' : ''}>${esc(p.name)}${p.name === 'studio' ? ' · 🥁 drums/bass/synth' : ''}</option>`).join('');
   kit.onchange = async () => { JUKE.preset = kit.value; await jukeKitChanged(); toast(`kit → <span class="g">${JUKE.preset}</span>`); };
   await jukeKitChanged();
   refreshJukeStatus();
@@ -615,7 +618,7 @@ async function jukeKitChanged() {
     sel.innerHTML = `<option>— no MIDI yet —</option>`;
     $('#jukeMap').innerHTML = `<div class="juke-empty">No songs yet. Drop a <code>.mid</code> with <b>＋ import</b> above, or run <code>claudio song import &lt;file.mid&gt;</code>.</div>`;
   } else {
-    sel.innerHTML = songs.map(s => `<option ${s === JUKE.song ? 'selected' : ''}>${s}</option>`).join('');
+    sel.innerHTML = songs.map(s => `<option ${s === JUKE.song ? 'selected' : ''}>${esc(s)}</option>`).join('');
     JUKE.song = JUKE.song && songs.includes(JUKE.song) ? JUKE.song : songs[0];
     sel.value = JUKE.song;
     await loadJukePlan();
@@ -734,7 +737,7 @@ async function jukeSaveKit() {
   const name = prompt(`Save these ${picks.length} sounds as a preset — name it:`);
   if (!name || !name.trim()) return;
   const r = await api.post('/api/preset/create', { name: name.trim(), set_active: false, voices: picks });
-  if (!r || !r.ok) { toast((r && r.msg) || 'could not create'); return; }
+  if (!r || !r.ok) { toast(esc((r && r.msg) || 'could not create')); return; }
   try { const s = await api.get('/api/state'); STATE.presets = s.presets; } catch { }
   toast(`💾 saved <span class="g">${r.name}</span> · ${(r.voices || picks).length} sounds — in Browse presets`);
 }
@@ -747,7 +750,7 @@ async function jukePlay() {
   if (!JUKE.song) { toast('import a MIDI first'); return; }
   const r = await api.post('/api/midiplay/start', { song: JUKE.song, preset: JUKE.preset, tempo: JUKE.tempo, loop: JUKE.loop, mapping: jukeMapPayload() });
   if (r && r.ok) { toast(`🎹 performing <span class="g">${JUKE.song}</span>`); setTimeout(refreshJukeStatus, 250); }
-  else toast((r && r.msg) || 'could not start');
+  else toast(esc((r && r.msg) || 'could not start'));
 }
 async function jukeStop() { await api.post('/api/midiplay/stop', {}); setTimeout(refreshJukeStatus, 200); }
 
@@ -797,9 +800,9 @@ function jukeImportFile(file) {
       const s = await api.get('/api/state'); STATE.music = s.music;     // refresh song list
       JUKE.song = r.name;
       const sel = $('#jukeSong');
-      sel.innerHTML = (STATE.music.songs || []).map(x => `<option ${x === r.name ? 'selected' : ''}>${x}</option>`).join('');
+      sel.innerHTML = (STATE.music.songs || []).map(x => `<option ${x === r.name ? 'selected' : ''}>${esc(x)}</option>`).join('');
       await loadJukePlan();
-    } else toast((r && r.msg) || 'import failed');
+    } else toast(esc((r && r.msg) || 'import failed'));
   };
   rd.readAsDataURL(file);
 }
@@ -808,14 +811,14 @@ function renderTip() {
   const grid = $('#tipGrid'); grid.innerHTML = '';
   (DONATE.methods || []).forEach(m => {
     const card = document.createElement('div'); card.className = 'tip-card';
-    const accepts = (m.accepts || []).map(a => `<span class="tip-chip">${a}</span>`).join('');
+    const accepts = (m.accepts || []).map(a => `<span class="tip-chip">${esc(a)}</span>`).join('');
     card.innerHTML = `
-      <div class="tip-card-head"><span class="tip-coin">${m.label}</span><span class="tip-sym">${m.symbol || ''}</span></div>
-      <img class="tip-qr" src="/static/qr/${m.id}.svg" alt="${m.symbol} address QR">
+      <div class="tip-card-head"><span class="tip-coin">${esc(m.label)}</span><span class="tip-sym">${esc(m.symbol || '')}</span></div>
+      <img class="tip-qr" src="/static/qr/${encodeURIComponent(m.id)}.svg" alt="${esc(m.symbol)} address QR">
       <div class="tip-accepts">${accepts}</div>
       <div class="tip-addr-row">
-        <code class="tip-addr" title="${m.address}">${m.address}</code>
-        <button class="tip-copy" data-addr="${m.address}" data-sym="${m.symbol}">copy</button>
+        <code class="tip-addr" title="${esc(m.address)}">${esc(m.address)}</code>
+        <button class="tip-copy" data-addr="${esc(m.address)}" data-sym="${esc(m.symbol)}">copy</button>
       </div>`;
     card.querySelector('.tip-copy').onclick = async (e) => {
       const b = e.currentTarget;
@@ -836,10 +839,10 @@ function renderBrowser(filter) {
     const c = document.createElement('div');
     c.className = 'card' + (p.name === cur ? ' active' : '') + (p.custom ? ' custom' : '');
     const customBtns = p.custom ? `<button class="cardx rename" title="rename">✎</button><button class="cardx del" title="delete">🗑</button>` : '';
-    c.innerHTML = `<div class="nm">${p.name}${p.custom ? '<span class="cust-tag">custom</span>' : ''}</div><div class="desc">${p.description || ''}</div>
+    c.innerHTML = `<div class="nm">${esc(p.name)}${p.custom ? '<span class="cust-tag">custom</span>' : ''}</div><div class="desc">${esc(p.description || '')}</div>
       <div class="meta"><span class="chip">${p.voice_count} voices</span>${p.has_drone ? '<span class="chip">drone</span>' : ''}${customBtns}<button class="play" title="audition">▶</button></div>`;
     c.onclick = (e) => { if (e.target.closest('.play,.cardx')) return; assignPreset(p.name); };
-    c.querySelector('.play').onclick = (e) => { e.stopPropagation(); api.post('/api/audition', { name: p.name }); toast(`auditioning <span class="g">${p.name}</span>`); };
+      c.querySelector('.play').onclick = (e) => { e.stopPropagation(); api.post('/api/audition', { name: p.name }); toast(`auditioning <span class="g">${esc(p.name)}</span>`); };
     if (p.custom) {
       c.querySelector('.del').onclick = (e) => { e.stopPropagation(); deletePreset(p.name); };
       c.querySelector('.rename').onclick = (e) => { e.stopPropagation(); renamePreset(p.name); };
@@ -850,11 +853,11 @@ function renderBrowser(filter) {
 async function assignPreset(name) {
   if (FOCUS.kind === 'global') {
     await api.post('/api/preset/use', { name });
-    STATE.active = name; $('#npName').textContent = name; toast(`default → <span class="g">${name}</span>`);
+    STATE.active = name; $('#npName').textContent = name; toast(`default → <span class="g">${esc(name)}</span>`);
   } else {
     const s = FOCUS.s;
     await api.post('/api/session/pin', { id: s.id, preset: name });
-    s.preset = name; s.pinned = name; s.source = 'pin'; toast(`<span class="g">${s.base}</span> → ${name}`);
+    s.preset = name; s.pinned = name; s.source = 'pin'; toast(`<span class="g">${esc(s.base)}</span> → ${esc(name)}`);
   }
   closeBrowser(); renderRail(); loadFocus();
 }
@@ -875,7 +878,7 @@ function renderVoices() {
     const col = PALETTE[i % PALETTE.length]; const di = delayIdx(v.delay);
     row.innerHTML = `
       <span class="orb" style="--c:${col}"></span>
-      <span class="vname" title="click to hear ${v.name}">${v.name}</span>
+      <span class="vname" title="click to hear ${esc(v.name)}">${esc(v.name)}</span>
       <div class="controls">
         <div class="ctl"><span class="k" title="how loud this sound is">volume</span><input type="range" class="r gain" min="0" max="1" step="0.01" value="${v.gain}" title="how loud this sound is"><span class="val gv">${fmt(v.gain,2)}</span></div>
         <div class="ctl"><span class="k" title="echoey space / wash around the sound">reverb</span><input type="range" class="r rev wet" min="0" max="1" step="0.01" value="${v.reverb.wet||0}" title="echoey space / wash around the sound"><span class="val wv">${fmt(v.reverb.wet||0,2)}</span></div>
@@ -890,7 +893,7 @@ function renderVoices() {
     g.onchange = () => api.post('/api/voice', { preset: P, voice: v.name, field: 'gain', value: +g.value });
     const w = row.querySelector('.wet'); setFill(w);
     w.oninput = () => { row.querySelector('.wv').textContent = fmt(w.value,2); setFill(w); };
-    w.onchange = () => { if (!v.regenable) { toast('reverb fixed (no renderer)'); return; } api.post('/api/voice/reverb', { preset: P, voice: v.name, wet: +w.value }); toast(`re-rendering <span class="g">${v.name}</span>…`); };
+    w.onchange = () => { if (!v.regenable) { toast('reverb fixed (no renderer)'); return; } api.post('/api/voice/reverb', { preset: P, voice: v.name, wet: +w.value }); toast(`re-rendering <span class="g">${esc(v.name)}</span>…`); };
     row.querySelectorAll('.dchip').forEach(ch => ch.onclick = () => { const o = DELAYS[+ch.dataset.j];
       row.querySelectorAll('.dchip').forEach(x => x.classList.remove('on')); ch.classList.add('on');
       if (!o.v) api.post('/api/voice/delay', { preset: P, voice: v.name, off: true });
@@ -919,15 +922,15 @@ function scrollFlashVoice(name) {
 function playMapped(row, label) {
   const sel = row.querySelector('select.vsel');
   const voice = sel ? sel.value : null;
-  if (!voice || voice === '__none__') { toast(`<span class="g">${label}</span> is silent`); return; }
+  if (!voice || voice === '__none__') { toast(`<span class="g">${esc(label)}</span> is silent`); return; }
   api.post('/api/voice/play', { preset: editPreset(), voice });
   flare(voice);
-  toast(`<span class="g">${label}</span> → ${voice}`);
+  toast(`<span class="g">${esc(label)}</span> → ${esc(voice)}`);
 }
 function renderEvents() {
   const wrap = $('#events'); wrap.innerHTML = ''; const P = editPreset();
   const opts = (sel) => ['<option value="__none__"' + (sel == null ? ' selected' : '') + '>— silent —</option>']
-    .concat(DETAIL.voice_names.map(n => `<option ${n === sel ? 'selected' : ''}>${n}</option>`)).join('');
+    .concat(DETAIL.voice_names.map(n => `<option ${n === sel ? 'selected' : ''}>${esc(n)}</option>`)).join('');
 
   const tools = document.createElement('div'); tools.className = 'etools';
   tools.innerHTML = `<span class="etools-note">each row is a moment in Claude's work → the sound it plays. A dot glows when it just fired; the bar shows how often.</span>
@@ -943,14 +946,14 @@ function renderEvents() {
   evs.forEach(ev => {
     const g = document.createElement('div'); g.className = 'egroup'; g.dataset.event = ev.event;
     const row = document.createElement('div'); row.className = 'erow'; row.dataset.event = ev.event;
-    row.innerHTML = `<span class="edot"></span><span class="elabel" title="click to preview this sound"><span class="ename">${evTitle(ev.event)}</span><span class="edesc">${evDesc(ev.event)}</span><span class="etech">${ev.event}</span><span class="ecount" data-event="${ev.event}"></span></span><select class="vsel ${ev.default==null?'silent':''}" title="the sound this moment plays">${opts(ev.default)}</select><button class="ejump" title="open this sound's controls below">✎</button><i class="efreq" data-event="${ev.event}"></i>`;
+    row.innerHTML = `<span class="edot"></span><span class="elabel" title="click to preview this sound"><span class="ename">${esc(evTitle(ev.event))}</span><span class="edesc">${esc(evDesc(ev.event))}</span><span class="etech">${esc(ev.event)}</span><span class="ecount" data-event="${esc(ev.event)}"></span></span><select class="vsel ${ev.default==null?'silent':''}" title="the sound this moment plays">${opts(ev.default)}</select><button class="ejump" title="open this sound's controls below">✎</button><i class="efreq" data-event="${esc(ev.event)}"></i>`;
     row.querySelector('select').onchange = e => { api.post('/api/map', { preset: P, event: ev.event, key: 'default', voice: e.target.value }); e.target.classList.toggle('silent', e.target.value === '__none__'); };
     row.querySelector('.elabel').onclick = () => playMapped(row, ev.event);
     row.querySelector('.ejump').onclick = () => scrollFlashVoice(row.querySelector('select').value);
     g.appendChild(row);
     Object.entries(ev.by_tool).forEach(([tool, voice]) => {
       const sr = document.createElement('div'); sr.className = 'erow sub';
-      sr.innerHTML = `<span></span><span class="elabel" title="click to preview this sound"><span class="ename">only the ${tool} tool</span><span class="ekey">override</span></span><select class="vsel ${voice==null?'silent':''}" title="a special sound just for the ${tool} tool">${opts(voice)}</select><button class="ejump" title="open this sound's controls below">✎</button>`;
+      sr.innerHTML = `<span></span><span class="elabel" title="click to preview this sound"><span class="ename">only the ${esc(tool)} tool</span><span class="ekey">override</span></span><select class="vsel ${voice==null?'silent':''}" title="a special sound just for the ${esc(tool)} tool">${opts(voice)}</select><button class="ejump" title="open this sound's controls below">✎</button>`;
       sr.querySelector('select').onchange = e => api.post('/api/map', { preset: P, event: ev.event, key: tool, voice: e.target.value });
       sr.querySelector('.elabel').onclick = () => playMapped(sr, tool);
       sr.querySelector('.ejump').onclick = () => scrollFlashVoice(sr.querySelector('select').value);
@@ -1025,7 +1028,7 @@ async function toggleDroneTop() {
   const on = !d.running;
   const r = await api.post(on ? '/api/drone/start' : '/api/drone/stop', {});
   if (r.drone) STATE.drone = r.drone;
-  if (on && r.ok === false) { toast(r.msg || 'no drone'); return; }
+  if (on && r.ok === false) { toast(esc(r.msg || 'no drone')); return; }
   paintDroneTop();
   const sp = $('.tabpanel[data-panel="setup"]'); if (sp && !sp.hidden) renderSettings();
   toast(on ? 'drone <span class="g">on</span> — it follows your root' : 'drone off');
@@ -1058,7 +1061,7 @@ function renderDrone(wrap) {
     const on = !e.currentTarget.classList.contains('on');
     const r = await api.post(on ? '/api/drone/start' : '/api/drone/stop', {});
     if (r.drone) STATE.drone = r.drone;
-    if (on && r.ok === false) { toast(r.msg || 'no drone'); return; }
+    if (on && r.ok === false) { toast(esc(r.msg || 'no drone')); return; }
     renderSettings(); paintDroneTop();
     toast(on ? 'drone <span class="g">on</span> — it follows your root' : 'drone off');
   };
@@ -1208,10 +1211,10 @@ setInterval(() => {
 function renderActions() {
   const w = $('#presetActions'); w.innerHTML = ''; const P = editPreset();
   const acts = [
-    { lab: 'Audition', small: 'play a taste of this preset', btn: '▶ play', cls: '', fn: () => { api.post('/api/audition', { name: P }); toast(`auditioning <span class="g">${P}</span>`); } },
+    { lab: 'Audition', small: 'play a taste of this preset', btn: '▶ play', cls: '', fn: () => { api.post('/api/audition', { name: P }); toast(`auditioning <span class="g">${esc(P)}</span>`); } },
     { lab: 'Test events', small: 'fire one of each hook event', btn: 'run test', cls: 'ghost', fn: () => { api.post('/api/test', { name: P }); toast('walking through events…'); } },
-    { lab: 'Regenerate samples', small: 'rebuild all WAVs from render.py', btn: 'regenerate', cls: 'ghost', fn: () => { api.post('/api/regen', { name: P }); toast(`re-rendering <span class="g">${P}</span>…`); } },
-    { lab: 'Reset preset', small: 'restore preset.json from shipped default', btn: 'reset', cls: 'danger', fn: async () => { const r = await api.post('/api/preset/reset', { name: P }); toast(r.ok ? 'reset to default' : (r.msg || 'no default')); if (r.ok) loadFocus(); } },
+    { lab: 'Regenerate samples', small: 'rebuild all WAVs from render.py', btn: 'regenerate', cls: 'ghost', fn: () => { api.post('/api/regen', { name: P }); toast(`re-rendering <span class="g">${esc(P)}</span>…`); } },
+    { lab: 'Reset preset', small: 'restore preset.json from shipped default', btn: 'reset', cls: 'danger', fn: async () => { const r = await api.post('/api/preset/reset', { name: P }); toast(r.ok ? 'reset to default' : esc(r.msg || 'no default')); if (r.ok) loadFocus(); } },
   ];
   acts.forEach(a => { const el = document.createElement('div'); el.className = 'actrow';
     el.innerHTML = `<div class="alab">${a.lab}<small>${a.small}</small></div><button class="btn ${a.cls}">${a.btn}</button>`;
@@ -1220,8 +1223,8 @@ function renderActions() {
 
 /* ---------------- rules ---------------- */
 function presetOptions(sel, includeNone, noneLabel) {
-  const o = includeNone ? [`<option value="__none__"${sel==null?' selected':''}>${noneLabel||'— none —'}</option>`] : [];
-  return o.concat(STATE.presets.map(p => `<option ${p.name===sel?'selected':''}>${p.name}</option>`)).join('');
+  const o = includeNone ? [`<option value="__none__"${sel==null?' selected':''}>${esc(noneLabel||'— none —')}</option>`] : [];
+  return o.concat(STATE.presets.map(p => `<option ${p.name===sel?'selected':''}>${esc(p.name)}</option>`)).join('');
 }
 function renderRules() {
   const rl = $('#rulesList'); rl.innerHTML = '';
@@ -1230,8 +1233,8 @@ function renderRules() {
   if (!rules.length) rl.innerHTML = '<div class="rempty">no directory rules — add one below</div>';
   rules.forEach(r => {
     const el = document.createElement('div'); el.className = 'rule';
-    const cond = [r.time && `⏰ ${r.time}`, r.idle_after_s && `idle ${r.idle_after_s}s`].filter(Boolean).map(c => `<span class="rcond">${c}</span>`).join('');
-    el.innerHTML = `<span class="rpat">${r.pattern}</span><span class="rarrow">→</span><span class="rpre">${r.preset}</span>${cond}<button class="rx" title="remove">✕</button>`;
+    const cond = [r.time && `⏰ ${r.time}`, r.idle_after_s && `idle ${r.idle_after_s}s`].filter(Boolean).map(c => `<span class="rcond">${esc(c)}</span>`).join('');
+    el.innerHTML = `<span class="rpat">${esc(r.pattern)}</span><span class="rarrow">→</span><span class="rpre">${esc(r.preset)}</span>${cond}<button class="rx" title="remove">✕</button>`;
     el.querySelector('.rx').onclick = async () => { await api.post('/api/rule/rm', { pattern: r.pattern }); await refreshState(); renderRules(); toast('rule removed'); };
     rl.appendChild(el);
   });
@@ -1241,7 +1244,7 @@ function renderRules() {
     addBtn.onclick = async () => { const pattern = $('#rulePattern').value.trim(); const preset = $('#rulePreset').value;
       if (!pattern) { toast('enter a path pattern'); return; }
       const r = await api.post('/api/rule/add', { pattern, preset });
-      if (r.ok) { $('#rulePattern').value = ''; await refreshState(); renderRules(); toast(`rule added → <span class="g">${preset}</span>`); } else toast('could not add rule'); };
+      if (r.ok) { $('#rulePattern').value = ''; await refreshState(); renderRules(); toast(`rule added → <span class="g">${esc(preset)}</span>`); } else toast('could not add rule'); };
   }
 }
 async function refreshState() { const s = await api.get('/api/state'); STATE.rules = s.rules; STATE.sessions = s.sessions; STATE.music = s.music; }

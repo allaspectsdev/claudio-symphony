@@ -44,6 +44,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable, List
+import stateio
 
 HERE = Path(__file__).resolve().parent
 STATE = HERE / "state"
@@ -365,13 +366,9 @@ _LIVE_LOCK = threading.Lock()
 
 
 def _write_players(data) -> None:
-    """Atomic write (temp + os.replace) so concurrent async hooks don't write a
-    half-file. Does not fully serialize read-modify-write — the image-name
-    sweep in _stop is the real backstop against a lost update."""
+    """Serialize and atomically replace the cross-process PID registry."""
     try:
-        tmp = PLAYERS_FILE.with_name(PLAYERS_FILE.name + ".tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.replace(PLAYERS_FILE)        # os.replace: atomic + overwrites on win+posix
+        stateio.save_json(PLAYERS_FILE, data, indent=None, newline=False)
     except Exception:
         pass
 
@@ -382,14 +379,12 @@ def _persist_pid(pid: int, tag: str) -> None:
     try:
         rec = {"pid": pid, "tag": tag, "ts": time.time(),
                "image": get_backend().image_name}
-        data = []
-        if PLAYERS_FILE.exists():
-            try:
-                data = json.loads(PLAYERS_FILE.read_text())
-            except Exception:
+        def mutate(data):
+            if not isinstance(data, list):
                 data = []
-        data.append(rec)
-        _write_players(data[-256:])
+            data.append(rec)
+            return data[-256:]
+        stateio.update_json(PLAYERS_FILE, [], mutate, indent=None, newline=False)
     except Exception:
         pass
 
@@ -660,17 +655,15 @@ def _stop(tag: Optional[str]) -> None:
     # 2) persisted PIDs (cross-process: `claudio off` vs hook-spawned players)
     try:
         if PLAYERS_FILE.exists():
-            data = json.loads(PLAYERS_FILE.read_text())
-            keep = []
-            for rec in data:
-                if (tag is None or rec.get("tag") == tag) and _fresh(rec):
-                    terminate_pid(rec.get("pid"))
-                elif tag is not None and rec.get("tag") != tag and _fresh(rec):
-                    # keep only OTHER-tag records that could still be live;
-                    # stale ones (and killed ones) are dropped so the file
-                    # doesn't grow without bound.
-                    keep.append(rec)
-            _write_players(keep)
+            def mutate(data):
+                keep = []
+                for rec in data if isinstance(data, list) else []:
+                    if (tag is None or rec.get("tag") == tag) and _fresh(rec):
+                        terminate_pid(rec.get("pid"))
+                    elif tag is not None and rec.get("tag") != tag and _fresh(rec):
+                        keep.append(rec)
+                return keep
+            stateio.update_json(PLAYERS_FILE, [], mutate, indent=None, newline=False)
     except Exception:
         pass
     # 3) image-name sweep for OUR dedicated player binary (belt & suspenders).

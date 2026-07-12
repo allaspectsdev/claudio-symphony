@@ -10,13 +10,15 @@ the live-activity view reads the very markers event.py touches when Claude works
 Run:  python3 webui.py [--port 8788] [--open]
   or: claudio web
 """
-import os, sys, json, time, re, random, shutil, threading, urllib.parse
+import os, sys, json, time, re, random, secrets, shutil, threading, urllib.parse
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import audio  # noqa: E402  (cross-platform playback + process helpers)
+import stateio  # noqa: E402  (cross-process JSON transactions)
 PRESETS = HERE / "presets"
 STATE = HERE / "state"
 CONFIG = HERE / "config.json"
@@ -31,6 +33,24 @@ REC_EVENTS = REC_DIR / "events.jsonl"
 OUT_DIR = HERE / "recordings"
 WEB = HERE / "web"
 SR_HINT = 44100
+AUTH_COOKIE = "claudio_session"
+AUTH_TOKEN = secrets.token_urlsafe(32)
+MAX_JSON_BODY = 12 * 1024 * 1024      # enough for a ~9 MB MIDI upload, bounded against memory DoS
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com data:; "
+        "img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; "
+        "object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": "microphone=(self)",
+}
 
 try:
     import song as song_mod
@@ -64,27 +84,50 @@ PROGRESSION_PRESETS = {
 # ---------- json + domain helpers (mirror cli.py, no import side effects) ----------
 
 def load_json(p, default):
-    try: return json.loads(p.read_text()) if p.exists() else default
-    except Exception: return default
+    return stateio.load_json(p, default)
 
 def save_json(p, d):
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(d, indent=2) + "\n")
-    tmp.rename(p)
+    stateio.save_json(p, d)
 
 def load_config(): return load_json(CONFIG, {})
 def save_config(d): save_json(CONFIG, d)
+def update_config(mutator): return stateio.update_json(CONFIG, {}, mutator)
+def patch_config(values=None, remove=()):
+    def mutate(cfg):
+        cfg.update(values or {})
+        for key in remove:
+            cfg.pop(key, None)
+    return update_config(mutate)
 def active_preset_name(): return load_config().get("preset", "meadow")
 
 def list_preset_names():
     if not PRESETS.exists(): return []
     return sorted(d.name for d in PRESETS.iterdir() if (d / "preset.json").exists())
 
-def load_preset(name):
-    p = PRESETS / name / "preset.json"
-    return load_json(p, None)
+def safe_child(root, relative):
+    """Resolve ``relative`` below ``root`` or return None on traversal."""
+    try:
+        root = Path(root).resolve()
+        candidate = (root / urllib.parse.unquote(str(relative))).resolve()
+        candidate.relative_to(root)
+        return candidate
+    except (OSError, ValueError):
+        return None
 
-def save_preset(name, d): save_json(PRESETS / name / "preset.json", d)
+def preset_path(name, leaf="preset.json"):
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name):
+        return None
+    return safe_child(PRESETS, Path(name) / leaf)
+
+def load_preset(name):
+    p = preset_path(name)
+    return load_json(p, None) if p else None
+
+def save_preset(name, d):
+    p = preset_path(name)
+    if p is None:
+        raise ValueError("invalid preset name")
+    save_json(p, d)
 
 def clamp(x, lo, hi): return max(lo, min(hi, x))
 
@@ -95,7 +138,10 @@ ALL_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
 
 def voice_dir(preset, voice):
     cfg = (load_preset(preset) or {}).get("voices", {}).get(voice, {})
-    return PRESETS / preset / "samples" / cfg.get("dir", voice)
+    base = preset_path(preset, "samples")
+    if base is None:
+        return PRESETS / "__invalid__"
+    return safe_child(base, cfg.get("dir", voice)) or (PRESETS / "__invalid__")
 
 def samples_in(d):
     return sorted(p for p in d.iterdir() if p.suffix == ".wav") if d.exists() else []
@@ -121,8 +167,8 @@ def play_voice(preset, voice):
     return play_sample(random.choice(smp), g)
 
 def regen_voice(preset, voice):
-    render = PRESETS / preset / "render.py"
-    if not render.exists(): return False, "no render.py for this preset"
+    render = preset_path(preset, "render.py")
+    if render is None or not render.exists(): return False, "no render.py for this preset"
     def _run():
         try:
             audio.spawn_python(render, [voice], cwd=str(HERE))
@@ -209,7 +255,9 @@ def fire_test(preset_hint=None):
     """Fire one of each event through event.py (uses the active routing)."""
     seq = [("SessionStart", {}), ("UserPromptSubmit", {}),
            ("PreToolUse", {"tool_name": "Read"}), ("PreToolUse", {"tool_name": "Edit"}),
-           ("PostToolUse", {"tool_name": "Bash"}), ("SubagentStop", {}),
+           ("PostToolUse", {"tool_name": "Bash"}),
+           ("PostToolUseFailure", {"tool_name": "Bash", "error": "test failure"}),
+           ("SubagentStop", {}),
            ("Stop", {}), ("Notification", {}), ("SessionEnd", {})]
     def _run():
         for name, extra in seq:
@@ -268,7 +316,7 @@ def build_palette():
         p = load_preset(name) or {}
         vs = []
         for vn, vc in (p.get("voices", {}) or {}).items():
-            n = len(samples_in(PRESETS / name / "samples" / vc.get("dir", vn)))
+            n = len(samples_in(voice_dir(name, vn)))
             if n:
                 vs.append({"voice": vn, "gain": vc.get("gain", 0.5), "samples": n})
         if vs:
@@ -323,7 +371,7 @@ def create_custom_preset(spec):
             if not srcp or sv not in (srcp.get("voices") or {}):
                 continue
             svc = srcp["voices"][sv]
-            srcdir = PRESETS / sp / "samples" / svc.get("dir", sv)
+            srcdir = voice_dir(sp, sv)
             if not samples_in(srcdir):
                 continue
             vn = _slug(pk.get("name") or sv) or sv
@@ -364,21 +412,21 @@ def delete_custom_preset(name):
     if not _is_custom(name):
         return {"ok": False, "msg": "only presets you built can be deleted"}
     # if it's the global default, fall back to meadow
-    cfg = load_config()
-    if cfg.get("preset") == name:
-        cfg["preset"] = "meadow" if (PRESETS / "meadow").exists() else (list_preset_names() or ["meadow"])[0]
-        save_config(cfg)
+    fallback = "meadow" if (PRESETS / "meadow").exists() else (list_preset_names() or ["meadow"])[0]
+    def update_active(cfg):
+        if cfg.get("preset") == name:
+            cfg["preset"] = fallback
+    update_config(update_active)
     # drop references in sessions pins + cwd rules
     try:
-        sj = load_json(SESSIONS_FILE, {"active": {}})
-        for sid, rec in (sj.get("active", {}) or {}).items():
-            if rec.get("preset_pinned") == name: rec.pop("preset_pinned", None)
-        save_json(SESSIONS_FILE, sj)
+        def unpin(sj):
+            for rec in (sj.get("active", {}) or {}).values():
+                if rec.get("preset_pinned") == name: rec.pop("preset_pinned", None)
+        stateio.update_json(SESSIONS_FILE, {"active": {}}, unpin)
     except Exception: pass
     try:
-        rj = load_json(RULES_FILE, {"rules": []})
-        rj["rules"] = [r for r in rj.get("rules", []) if r.get("preset") != name]
-        save_json(RULES_FILE, rj)
+        stateio.update_json(RULES_FILE, {"rules": []},
+                            lambda rj: rj.update(rules=[r for r in rj.get("rules", []) if r.get("preset") != name]))
     except Exception: pass
     shutil.rmtree(PRESETS / name, ignore_errors=True)
     shutil.rmtree(STATE / name, ignore_errors=True)
@@ -403,19 +451,20 @@ def rename_custom_preset(name, to):
     if (STATE / name).exists():
         try: (STATE / name).rename(STATE / to)
         except Exception: pass
-    cfg = load_config()
-    if cfg.get("preset") == name: cfg["preset"] = to; save_config(cfg)
+    def update_active(cfg):
+        if cfg.get("preset") == name: cfg["preset"] = to
+    update_config(update_active)
     try:
-        sj = load_json(SESSIONS_FILE, {"active": {}})
-        for rec in (sj.get("active", {}) or {}).values():
-            if rec.get("preset_pinned") == name: rec["preset_pinned"] = to
-        save_json(SESSIONS_FILE, sj)
+        def repin(sj):
+            for rec in (sj.get("active", {}) or {}).values():
+                if rec.get("preset_pinned") == name: rec["preset_pinned"] = to
+        stateio.update_json(SESSIONS_FILE, {"active": {}}, repin)
     except Exception: pass
     try:
-        rj = load_json(RULES_FILE, {"rules": []})
-        for r in rj.get("rules", []):
-            if r.get("preset") == name: r["preset"] = to
-        save_json(RULES_FILE, rj)
+        def reroute(rj):
+            for r in rj.get("rules", []):
+                if r.get("preset") == name: r["preset"] = to
+        stateio.update_json(RULES_FILE, {"rules": []}, reroute)
     except Exception: pass
     return {"ok": True, "name": to}
 
@@ -429,11 +478,11 @@ def swap_voice_sound(preset, voice, src_preset, src_voice):
     if not sp or src_voice not in (sp.get("voices") or {}):
         return {"ok": False, "msg": "source sound not found"}
     svc = sp["voices"][src_voice]
-    srcdir = PRESETS / src_preset / "samples" / svc.get("dir", src_voice)
+    srcdir = voice_dir(src_preset, src_voice)
     if not samples_in(srcdir):
         return {"ok": False, "msg": "source has no samples"}
     cfg = p["voices"][voice]
-    vdir = PRESETS / preset / "samples" / cfg.get("dir", voice)
+    vdir = voice_dir(preset, voice)
     try:
         vdir.mkdir(parents=True, exist_ok=True)
         for f in vdir.glob("*.wav"):            # clear old sound
@@ -461,7 +510,7 @@ def preset_detail(name):
             "rate_jitter": bool(vc.get("rate_jitter")),
             "reverb": {"wet": rv.get("wet", 0.0), "decay": rv.get("decay"),
                        "brightness": rv.get("brightness")},
-            "delay": dl, "regenable": (PRESETS / name / "render.py").exists(),
+            "delay": dl, "regenable": bool((preset_path(name, "render.py") or Path()).is_file()),
         })
     # events: always include all 9
     evmap = p.get("events", {}) or {}
@@ -484,7 +533,9 @@ def preset_detail(name):
     }
 
 def activity(name):
-    sd = STATE / name
+    if load_preset(name) is None:
+        return None
+    sd = safe_child(STATE, name) or (STATE / "__invalid__")
     now = time.time()
     def ts(path):
         try: return float(path.read_text().strip())
@@ -509,6 +560,12 @@ CT = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
       ".js": "text/javascript; charset=utf-8", ".json": "application/json",
       ".wav": "audio/wav", ".m4a": "audio/mp4",
       ".svg": "image/svg+xml", ".woff2": "font/woff2"}
+
+class HTTPInputError(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+        self.message = message
 
 def record_status():
     out = {"active": False, "recordings": [], "max": 300, "default": 30}
@@ -537,7 +594,11 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ClaudioWeb/1.0"
     def log_message(self, *a): pass  # quiet
 
-    def _send(self, code, body, ctype="application/json"):
+    def _common_headers(self):
+        for name, value in SECURITY_HEADERS.items():
+            self.send_header(name, value)
+
+    def _send(self, code, body, ctype="application/json", set_cookie=False):
         if isinstance(body, (dict, list)):
             body = json.dumps(body).encode()
         elif isinstance(body, str):
@@ -546,24 +607,79 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self._common_headers()
+        if set_cookie:
+            self.send_header("Set-Cookie", f"{AUTH_COOKIE}={AUTH_TOKEN}; Path=/; HttpOnly; SameSite=Strict")
         self.end_headers()
         self.wfile.write(body)
 
     def _json_body(self):
-        n = int(self.headers.get("Content-Length", 0) or 0)
-        if not n: return {}
-        try: return json.loads(self.rfile.read(n) or b"{}")
-        except Exception: return {}
+        ctype = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if ctype != "application/json":
+            raise HTTPInputError(415, "Content-Type must be application/json")
+        try:
+            n = int(self.headers.get("Content-Length", 0) or 0)
+        except ValueError:
+            raise HTTPInputError(400, "invalid Content-Length")
+        if n < 0 or n > MAX_JSON_BODY:
+            raise HTTPInputError(413, "request body too large")
+        try:
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except (UnicodeDecodeError, ValueError):
+            raise HTTPInputError(400, "invalid JSON")
+        if not isinstance(body, dict):
+            raise HTTPInputError(400, "JSON body must be an object")
+        return body
+
+    def _valid_host(self):
+        raw = self.headers.get("Host", "")
+        try:
+            parsed = urllib.parse.urlsplit("//" + raw)
+            port = parsed.port or 80
+            return parsed.hostname in LOOPBACK_HOSTS and port == self.server.server_port
+        except ValueError:
+            return False
+
+    def _authorized(self):
+        try:
+            cookie = SimpleCookie(self.headers.get("Cookie", ""))
+            value = cookie.get(AUTH_COOKIE)
+            return value is not None and secrets.compare_digest(value.value, AUTH_TOKEN)
+        except Exception:
+            return False
+
+    def _origin_allowed(self):
+        raw = self.headers.get("Origin")
+        if not raw:
+            return True     # non-browser clients still need the unguessable cookie
+        try:
+            origin = urllib.parse.urlsplit(raw)
+            return (origin.scheme == "http" and origin.hostname in LOOPBACK_HOSTS
+                    and (origin.port or 80) == self.server.server_port)
+        except ValueError:
+            return False
+
+    def _protected(self, path):
+        return path.startswith("/api/") or path.startswith("/recordings/") or path == "/sample"
+
+    def do_OPTIONS(self):
+        return self._send(403, {"error": "cross-origin requests are not allowed"})
 
     # ---- GET ----
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         path = u.path
+        if not self._valid_host():
+            return self._send(421, {"error": "invalid Host header"})
+        if self._protected(path) and not self._authorized():
+            return self._send(403, {"error": "authorization required"})
         if path == "/" or path == "/index.html":
-            return self._file(WEB / "index.html")
+            return self._file(WEB / "index.html", set_cookie=True)
         if path.startswith("/static/"):
-            return self._file(WEB / path[len("/static/"):])
+            rel = urllib.parse.unquote(path[len("/static/"):])
+            f = safe_child(WEB, rel)
+            return self._file(f) if f else self._send(404, {"error": "not found"})
         if path == "/api/state":
             return self._send(200, full_state())
         if path == "/api/preset":
@@ -572,7 +688,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, d) if d else self._send(404, {"error": "not found"})
         if path == "/api/activity":
             name = (q.get("name") or [active_preset_name()])[0]
-            return self._send(200, activity(name))
+            data = activity(name)
+            return self._send(200, data) if data is not None else self._send(404, {"error": "not found"})
         if path == "/api/donate":
             return self._send(200, load_json(HERE / "donate.json", {"methods": []}))
         if path == "/api/palette":
@@ -602,8 +719,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, out)
         if path.startswith("/recordings/"):
             fn = urllib.parse.unquote(path[len("/recordings/"):])
-            f = OUT_DIR / fn
-            if f.name != fn or not f.exists():     # block path traversal / missing
+            f = safe_child(OUT_DIR, fn)
+            if f is None or not f.exists():
                 return self._send(404, {"error": "not found"})
             return self._file(f)
         if path == "/sample":
@@ -614,7 +731,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._file(random.choice(smp))
         return self._send(404, {"error": "not found"})
 
-    def _file(self, p):
+    def _file(self, p, set_cookie=False):
+        if p is None:
+            return self._send(404, {"error": "not found"})
         p = Path(p)
         if not p.exists() or not p.is_file():
             return self._send(404, {"error": "not found"})
@@ -624,26 +743,41 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self._common_headers()
+        if set_cookie:
+            self.send_header("Set-Cookie", f"{AUTH_COOKIE}={AUTH_TOKEN}; Path=/; HttpOnly; SameSite=Strict")
         self.end_headers()
         self.wfile.write(data)
 
     # ---- POST ----
     def do_POST(self):
         u = urllib.parse.urlparse(self.path)
-        b = self._json_body()
         path = u.path
+        if not self._valid_host():
+            return self._send(421, {"error": "invalid Host header"})
+        if not self._authorized():
+            return self._send(403, {"error": "authorization required"})
+        if not self._origin_allowed():
+            return self._send(403, {"error": "cross-origin request rejected"})
+        try:
+            b = self._json_body()
+        except HTTPInputError as e:
+            return self._send(e.status, {"error": e.message})
         try:
             if path == "/api/preset/use":
-                cfg = load_config(); cfg["preset"] = str(b["name"]); save_config(cfg)
+                name = str(b["name"])
+                if load_preset(name) is None:
+                    return self._send(400, {"error": "unknown preset"})
+                cfg = patch_config({"preset": name})
                 return self._send(200, {"ok": True, "active": cfg["preset"]})
             if path == "/api/mute":
-                cfg = load_config(); cfg["muted"] = bool(b.get("muted")); save_config(cfg)
+                cfg = patch_config({"muted": bool(b.get("muted"))})
                 return self._send(200, {"ok": True, "muted": cfg["muted"]})
             if path == "/api/master":
-                cfg = load_config(); cfg["master_gain"] = round(clamp(float(b["gain"]), 0, 1), 3); save_config(cfg)
+                cfg = patch_config({"master_gain": round(clamp(float(b["gain"]), 0, 1), 3)})
                 return self._send(200, {"ok": True, "master_gain": cfg["master_gain"]})
             if path == "/api/drone":
-                cfg = load_config(); cfg["drone_gain"] = round(clamp(float(b["gain"]), 0, 1), 3); save_config(cfg)
+                cfg = patch_config({"drone_gain": round(clamp(float(b["gain"]), 0, 1), 3)})
                 return self._send(200, {"ok": True, "drone_gain": cfg["drone_gain"]})
             if path == "/api/drone/start":
                 cfg = load_config(); active = cfg.get("preset", "meadow")
@@ -669,7 +803,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, "drone": drone_state(cfg, cfg.get("preset", "meadow"))})
             if path == "/api/drone/follow":
                 # drone walks the chord progression's roots instead of holding A
-                cfg = load_config(); cfg["drone_chords"] = bool(b.get("on")); save_config(cfg)
+                cfg = patch_config({"drone_chords": bool(b.get("on"))})
                 return self._send(200, {"ok": True, "follow_chords": cfg["drone_chords"]})
             if path == "/api/voice":
                 return self._voice(b)
@@ -702,17 +836,16 @@ class Handler(BaseHTTPRequestHandler):
                 # semitone offset, or a pitch class 0..11 (the browser mic-jam
                 # mode sends the detected pitch class and we wrap to ±6 so the
                 # move is always the nearest enharmonic). null/clear → back to A.
-                cfg = load_config()
-                if b.get("clear") or (b.get("offset") is None and b.get("pc") is None):
-                    cfg.pop("root_offset", None)
+                clear = b.get("clear") or (b.get("offset") is None and b.get("pc") is None)
+                if clear:
+                    cfg = patch_config(remove=("root_offset",))
                 else:
                     if b.get("pc") is not None:
                         # nearest signed distance from A (pc 9), wrapped to [-6,6]
                         off = ((int(b["pc"]) - 9 + 6) % 12) - 6
                     else:
                         off = root_offset_clamped(b.get("offset"))
-                    cfg["root_offset"] = root_offset_clamped(off)
-                save_config(cfg)
+                    cfg = patch_config({"root_offset": root_offset_clamped(off)})
                 o = root_offset_clamped(cfg.get("root_offset", 0))
                 return self._send(200, {"ok": True, "root_offset": o, "root_note": root_note_name(o)})
             if path == "/api/chords":
@@ -720,36 +853,37 @@ class Handler(BaseHTTPRequestHandler):
                 # every voice to the live chord's tones. Body: {preset} to load
                 # a shipped progression, {steps:[labels]} for custom, {step_s},
                 # {enabled}, or {off:true}.
-                cfg = load_config(); prog = cfg.get("progression") or {}
-                if b.get("off"):
-                    prog["enabled"] = False
-                else:
-                    if b.get("preset") in PROGRESSION_PRESETS:
-                        prog["preset"] = b["preset"]
-                        prog["steps"] = list(PROGRESSION_PRESETS[b["preset"]])
-                        prog["enabled"] = True
-                    if isinstance(b.get("steps"), list):
-                        steps = [s for s in b["steps"] if s in CHORD_NAMES][:12]
-                        if len(steps) >= 2:
-                            prog["steps"] = steps; prog["preset"] = "custom"; prog["enabled"] = True
-                    if b.get("step_s") is not None:
-                        prog["step_s"] = round(clamp(float(b["step_s"]), 2, 60), 1)
-                    if "enabled" in b:
-                        prog["enabled"] = bool(b["enabled"]) and bool(prog.get("steps"))
-                cfg["progression"] = prog; save_config(cfg)
+                def mutate_chords(cfg):
+                    prog = cfg.get("progression") or {}
+                    if b.get("off"):
+                        prog["enabled"] = False
+                    else:
+                        if b.get("preset") in PROGRESSION_PRESETS:
+                            prog["preset"] = b["preset"]
+                            prog["steps"] = list(PROGRESSION_PRESETS[b["preset"]])
+                            prog["enabled"] = True
+                        if isinstance(b.get("steps"), list):
+                            steps = [s for s in b["steps"] if s in CHORD_NAMES][:12]
+                            if len(steps) >= 2:
+                                prog["steps"] = steps; prog["preset"] = "custom"; prog["enabled"] = True
+                        if b.get("step_s") is not None:
+                            prog["step_s"] = round(clamp(float(b["step_s"]), 2, 60), 1)
+                        if "enabled" in b:
+                            prog["enabled"] = bool(b["enabled"]) and bool(prog.get("steps"))
+                    cfg["progression"] = prog
+                cfg = update_config(mutate_chords); prog = cfg.get("progression") or {}
                 return self._send(200, {"ok": True, "progression": prog})
             if path == "/api/scale":
-                cfg = load_config(); name = b.get("name")
-                if name and name in SCALE_NAMES: cfg["scale_override"] = name
-                else: cfg.pop("scale_override", None)
-                save_config(cfg)
+                name = b.get("name")
+                cfg = patch_config({"scale_override": name}) if name in SCALE_NAMES else patch_config(remove=("scale_override",))
                 return self._send(200, {"ok": True, "scale_global": cfg.get("scale_override")})
             if path == "/api/quant":
-                cfg = load_config(); q = cfg.setdefault("quant", {})
-                if "enabled" in b: q["enabled"] = bool(b["enabled"])
-                if b.get("bpm") is not None: q["bpm"] = round(clamp(float(b["bpm"]), 30, 300), 1)
-                if b.get("grid") is not None: q["grid"] = float(b["grid"])
-                save_config(cfg)
+                def mutate_quant(cfg):
+                    q = cfg.setdefault("quant", {})
+                    if "enabled" in b: q["enabled"] = bool(b["enabled"])
+                    if b.get("bpm") is not None: q["bpm"] = round(clamp(float(b["bpm"]), 30, 300), 1)
+                    if b.get("grid") is not None: q["grid"] = clamp(float(b["grid"]), 0.0625, 4.0)
+                cfg = update_config(mutate_quant); q = cfg.get("quant", {})
                 return self._send(200, {"ok": True, "quant": q})
             if path == "/api/song":
                 if not song_mod: return self._send(200, {"ok": False, "msg": "no song module"})
@@ -759,11 +893,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, "song_global": song_mod.global_song()})
             if path == "/api/regen":
                 name = b.get("name", active_preset_name())
-                render = PRESETS / name / "render.py"
-                if render.exists():
+                render = preset_path(name, "render.py")
+                if render and render.exists():
                     threading.Thread(target=lambda: audio.spawn_python(render, cwd=str(HERE)),
                                      daemon=True).start()
-                return self._send(200, {"ok": render.exists()})
+                return self._send(200, {"ok": bool(render and render.exists())})
             if path == "/api/preset/reset":
                 return self._preset_reset(b)
             if path == "/api/test":
@@ -772,7 +906,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/preset/create":
                 res = create_custom_preset(b)
                 if res.get("ok") and b.get("set_active"):
-                    cfg = load_config(); cfg["preset"] = res["name"]; save_config(cfg)
+                    patch_config({"preset": res["name"]})
                 return self._send(200, res)
             if path == "/api/preset/delete":
                 return self._send(200, delete_custom_preset(str(b.get("name", ""))))
@@ -784,7 +918,9 @@ class Handler(BaseHTTPRequestHandler):
                     b.get("src_preset"), b.get("src_voice")))
             if path == "/api/counts/reset":
                 name = b.get("name", active_preset_name())
-                sd = STATE / name
+                if load_preset(name) is None:
+                    return self._send(400, {"error": "unknown preset"})
+                sd = safe_child(STATE, name)
                 removed = 0
                 if sd.exists():
                     for f in sd.glob("cnt-*.bin"):
@@ -836,110 +972,155 @@ class Handler(BaseHTTPRequestHandler):
 
     def _voice(self, b):
         preset = b.get("preset", active_preset_name())
-        p = load_preset(preset); v = p["voices"][b["voice"]]
+        path = preset_path(preset)
+        if path is None or load_preset(preset) is None:
+            return self._send(400, {"error": "unknown preset"})
         field = b["field"]
-        if field == "gain":
-            v["gain"] = round(clamp(float(b["value"]), 0, 1), 3)
-        elif field == "mioi":
-            v["mioi"] = round(clamp(float(b["value"]), 0.01, 120), 3)
-        elif field == "rate_jitter":
-            if bool(b["value"]): v["rate_jitter"] = True
-            else: v.pop("rate_jitter", None)
-        else:
+        if field not in ("gain", "mioi", "rate_jitter"):
             return self._send(400, {"error": "bad field"})
-        save_preset(preset, p)
+        def mutate(p):
+            v = p["voices"][b["voice"]]
+            if field == "gain":
+                v["gain"] = round(clamp(float(b["value"]), 0, 1), 3)
+            elif field == "mioi":
+                v["mioi"] = round(clamp(float(b["value"]), 0.01, 120), 3)
+            elif bool(b["value"]):
+                v["rate_jitter"] = True
+            else:
+                v.pop("rate_jitter", None)
+        stateio.update_json(path, {}, mutate)
         return self._send(200, {"ok": True})
 
     def _voice_reverb(self, b):
         preset = b.get("preset", active_preset_name())
-        p = load_preset(preset); v = p["voices"][b["voice"]]
-        rv = v.setdefault("reverb", {})
-        rv["wet"] = round(clamp(float(b["wet"]), 0, 1), 3)
-        if b.get("decay") is not None: rv["decay"] = round(clamp(float(b["decay"]), 0.1, 8), 2)
-        if b.get("brightness") is not None: rv["brightness"] = round(clamp(float(b["brightness"]), 0, 1), 2)
-        save_preset(preset, p)
+        path = preset_path(preset)
+        if path is None or load_preset(preset) is None:
+            return self._send(400, {"error": "unknown preset"})
+        def mutate(p):
+            rv = p["voices"][b["voice"]].setdefault("reverb", {})
+            rv["wet"] = round(clamp(float(b["wet"]), 0, 1), 3)
+            if b.get("decay") is not None: rv["decay"] = round(clamp(float(b["decay"]), 0.1, 8), 2)
+            if b.get("brightness") is not None: rv["brightness"] = round(clamp(float(b["brightness"]), 0, 1), 2)
+        stateio.update_json(path, {}, mutate)
         ok, msg = regen_voice(preset, b["voice"])
         return self._send(200, {"ok": True, "regen": ok, "msg": msg})
 
     def _voice_delay(self, b):
         preset = b.get("preset", active_preset_name())
-        p = load_preset(preset); v = p["voices"][b["voice"]]
-        if b.get("off"):
-            v.pop("delay", None)
-        else:
-            d = v.setdefault("delay", {})
-            d["ms"] = int(clamp(float(b["ms"]), 40, 2000))
-            d["feedback"] = round(clamp(float(b.get("feedback", d.get("feedback", 0.30))), 0, 0.85), 2)
-            d["count"] = int(clamp(float(b.get("count", d.get("count", 3))), 1, 8))
-        save_preset(preset, p)
+        path = preset_path(preset)
+        if path is None or load_preset(preset) is None:
+            return self._send(400, {"error": "unknown preset"})
+        def mutate(p):
+            v = p["voices"][b["voice"]]
+            if b.get("off"):
+                v.pop("delay", None)
+            else:
+                d = v.setdefault("delay", {})
+                d["ms"] = int(clamp(float(b["ms"]), 40, 2000))
+                d["feedback"] = round(clamp(float(b.get("feedback", d.get("feedback", 0.30))), 0, 0.85), 2)
+                d["count"] = int(clamp(float(b.get("count", d.get("count", 3))), 1, 8))
+        stateio.update_json(path, {}, mutate)
         return self._send(200, {"ok": True})  # live, no regen
 
     def _map(self, b):
         preset = b.get("preset", active_preset_name())
-        p = load_preset(preset); ev = b["event"]; key = b.get("key", "default")
+        path = preset_path(preset); ev = b["event"]; key = b.get("key", "default")
+        current = load_preset(preset)
+        if path is None or current is None:
+            return self._send(400, {"error": "unknown preset"})
+        if not isinstance(ev, str) or len(ev) > 80 or any(ord(c) < 32 for c in ev):
+            return self._send(400, {"error": "invalid event"})
+        if not isinstance(key, str) or len(key) > 120 or any(ord(c) < 32 for c in key):
+            return self._send(400, {"error": "invalid mapping key"})
         voice = b.get("voice")
         if voice in ("", "__none__", None) and b.get("voice", "__keep__") != "__keep__":
             voice = None
-        spec = p.setdefault("events", {}).setdefault(ev, {})
-        if key == "default":
-            spec["default"] = voice
-        elif key == "on_failure":
-            if voice is None: spec.pop("on_failure", None)
-            else: spec["on_failure"] = voice
-        else:  # by_tool key
-            bt = spec.setdefault("by_tool", {})
-            if voice is None: bt.pop(key, None)
-            else: bt[key] = voice
-        save_preset(preset, p)
+        if voice is not None and voice not in (current.get("voices") or {}):
+            return self._send(400, {"error": "unknown voice"})
+        def mutate(p):
+            spec = p.setdefault("events", {}).setdefault(ev, {})
+            if key == "default":
+                spec["default"] = voice
+            elif key == "on_failure":
+                if voice is None: spec.pop("on_failure", None)
+                else: spec["on_failure"] = voice
+            else:
+                bt = spec.setdefault("by_tool", {})
+                if voice is None: bt.pop(key, None)
+                else: bt[key] = voice
+        stateio.update_json(path, {}, mutate)
         return self._send(200, {"ok": True})
 
     def _reverb_scale(self, b):
         preset = b.get("preset", active_preset_name())
-        p = load_preset(preset)
-        p["reverb_scale"] = round(clamp(float(b["value"]), 0, 2), 3)
-        save_preset(preset, p)
+        path = preset_path(preset)
+        if path is None or load_preset(preset) is None:
+            return self._send(400, {"error": "unknown preset"})
+        stateio.update_json(path, {},
+                            lambda p: p.update(reverb_scale=round(clamp(float(b["value"]), 0, 2), 3)))
         # full regen in background
-        render = PRESETS / preset / "render.py"
-        if render.exists():
+        render = preset_path(preset, "render.py")
+        if render and render.exists():
             threading.Thread(target=lambda: audio.spawn_python(render, cwd=str(HERE)),
                              daemon=True).start()
-        return self._send(200, {"ok": True, "regen": render.exists()})
+        return self._send(200, {"ok": True, "regen": bool(render and render.exists())})
 
     def _session_set(self, b, key, value):
-        sid = b["id"]
-        d = load_json(SESSIONS_FILE, {"active": {}})
-        rec = d.setdefault("active", {}).setdefault(sid, {})
-        if value in (None, "", "__none__"): rec.pop(key, None)
-        else: rec[key] = value
-        save_json(SESSIONS_FILE, d)
+        sid = str(b["id"])
+        if not sid or len(sid) > 256:
+            return self._send(400, {"error": "invalid session id"})
+        if key == "preset_pinned" and value not in (None, "", "__none__") and load_preset(value) is None:
+            return self._send(400, {"error": "unknown preset"})
+        if key == "scale_override" and value not in (None, "", "__none__") and value not in SCALE_NAMES:
+            return self._send(400, {"error": "unknown scale"})
+        if key == "song_pinned" and value not in (None, "", "__none__") and (not song_mod or not song_mod.has_song(value)):
+            return self._send(400, {"error": "unknown song"})
+        found = {"value": False}
+        def mutate(d):
+            active = d.setdefault("active", {})
+            if sid not in active:
+                return
+            found["value"] = True
+            rec = active[sid]
+            if value in (None, "", "__none__"): rec.pop(key, None)
+            else: rec[key] = value
+        stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
+        if not found["value"]:
+            return self._send(404, {"error": "session not found"})
         return self._send(200, {"ok": True})
 
     def _rule_add(self, b):
         pattern = (b.get("pattern") or "").strip()
         preset = b.get("preset")
-        if not pattern or not preset or not (PRESETS / preset / "preset.json").exists():
+        if (not pattern or len(pattern) > 1024 or any(ord(c) < 32 for c in pattern)
+                or not preset or load_preset(preset) is None):
             return self._send(400, {"error": "need valid pattern + preset"})
         rule = {"pattern": pattern, "preset": preset}
-        if b.get("time"): rule["time"] = b["time"]
-        if b.get("idle_after_s"): rule["idle_after_s"] = int(b["idle_after_s"])
-        d = load_json(RULES_FILE, {"rules": []})
+        if b.get("time"):
+            window = str(b["time"])
+            if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d-(?:[01]\d|2[0-3]):[0-5]\d", window):
+                return self._send(400, {"error": "time must be HH:MM-HH:MM"})
+            rule["time"] = window
+        if b.get("idle_after_s"):
+            rule["idle_after_s"] = int(clamp(int(b["idle_after_s"]), 30, 86400))
         key = (rule["pattern"], rule.get("time"), rule.get("idle_after_s"))
-        rules = [r for r in d.get("rules", []) if (r.get("pattern"), r.get("time"), r.get("idle_after_s")) != key]
-        rules.append(rule); d["rules"] = rules
-        save_json(RULES_FILE, d)
+        def mutate(d):
+            rules = [r for r in d.get("rules", []) if (r.get("pattern"), r.get("time"), r.get("idle_after_s")) != key]
+            rules.append(rule); d["rules"] = rules
+        d = stateio.update_json(RULES_FILE, {"rules": []}, mutate)
+        rules = d["rules"]
         return self._send(200, {"ok": True, "rules": rules})
 
     def _rule_rm(self, b):
         pat = b.get("pattern")
-        d = load_json(RULES_FILE, {"rules": []})
-        d["rules"] = [r for r in d.get("rules", []) if r.get("pattern") != pat]
-        save_json(RULES_FILE, d)
+        d = stateio.update_json(RULES_FILE, {"rules": []},
+                                lambda d: d.update(rules=[r for r in d.get("rules", []) if r.get("pattern") != pat]))
         return self._send(200, {"ok": True, "rules": d["rules"]})
 
     def _preset_reset(self, b):
         name = b["name"]
-        default = PRESETS / name / "preset.default.json"
-        if default.exists():
+        default = preset_path(name, "preset.default.json")
+        if default and default.exists():
             save_preset(name, json.loads(default.read_text()))
             return self._send(200, {"ok": True, "msg": "restored from default"})
         return self._send(200, {"ok": False, "msg": "no preset.default.json for this preset"})

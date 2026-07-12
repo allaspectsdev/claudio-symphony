@@ -5,9 +5,8 @@ on:
   pull_request:
 
 jobs:
-  # Pure-logic audio tests run identically on all three OSes — detection,
-  # argv construction, scheduling, degradation, stop and the numpy pre-render
-  # are exercised without any audio device or external player.
+  # Audio, hook-schema, concurrency, failure-routing, and localhost web
+  # security tests run without audio hardware or external players.
   test:
     strategy:
       fail-fast: false
@@ -20,7 +19,8 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install numpy
-      - run: python -m unittest tests.test_audio -v
+      - run: python -m unittest discover -v
+      - run: node --check web/app.js
 
   # Guard: the macOS/POSIX-only primitives must live ONLY in audio.py. If any
   # runtime file reintroduces one, the README's "audio is one module" promise

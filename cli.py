@@ -121,7 +121,7 @@ Control surfaces
 Support
   coffee                           Show on-chain tip addresses (alias: tip, donate)
 """
-import os, sys, json, time, fnmatch, shlex
+import os, sys, json, time, fnmatch
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -130,6 +130,7 @@ import song as song_mod  # noqa: E402
 import audio  # noqa: E402  (cross-platform playback + process helpers)
 import midiplay as midiplay_mod  # noqa: E402
 import timeline as timeline_mod  # noqa: E402
+import stateio  # noqa: E402
 
 PRESETS = HERE / "presets"
 STATE = HERE / "state"
@@ -148,20 +149,17 @@ MARKER = "__claudio_symphony__"
 
 HOOK_EVENTS = [
     "SessionStart", "SessionEnd", "UserPromptSubmit", "Stop",
-    "PreToolUse", "PostToolUse", "SubagentStop",
+    "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStop",
     "Notification", "PreCompact",
 ]
 
 # ---------- json helpers ----------
 
 def load_json(p, default):
-    try: return json.loads(p.read_text()) if p.exists() else default
-    except Exception: return default
+    return stateio.load_json(p, default)
 
 def save_json(p, d):
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(d, indent=2) + "\n")
-    tmp.rename(p)
+    stateio.save_json(p, d)
 
 DEFAULT_PRESET = "meadow"
 DEFAULT_CONFIG = {
@@ -200,10 +198,10 @@ def hook_block_for():
         "matcher": "*",
         "hooks": [{
             "type": "command",
-            # shell-quoted so an install path containing spaces (e.g. a repo at
-            # "…/Claudio Symphony/event.py") still execs correctly. shlex.quote
-            # is a no-op for space-free paths, so existing installs are unchanged.
-            "command": shlex.quote(EVENT_PATH),
+            # Exec form: paths are arguments, not shell input.  This is safe for
+            # spaces and shell metacharacters and works with the active Python.
+            "command": sys.executable,
+            "args": [EVENT_PATH],
             "async": True,
             "timeout": 1,
             MARKER: True,
@@ -633,9 +631,8 @@ def cmd_session(args):
         preset = rest[1]
         if not (PRESETS / preset / "preset.json").exists():
             print(f"unknown preset '{preset}'"); return
-        d = load_json(SESSIONS_FILE, {"active": {}})
-        d.setdefault("active", {}).setdefault(sid, {})["preset_pinned"] = preset
-        save_json(SESSIONS_FILE, d)
+        def mutate(d): d.setdefault("active", {}).setdefault(sid, {})["preset_pinned"] = preset
+        stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
         print(f"pinned {sid[:8]} → {preset}")
         return
     if sub == "scale":
@@ -643,19 +640,17 @@ def cmd_session(args):
             print("usage: claudio session scale <id|index> <scale|off>"); return
         sid = _resolve_session(rest[0])
         if not sid: print(f"no session matches '{rest[0]}'"); return
-        d = load_json(SESSIONS_FILE, {"active": {}})
-        rec = d.setdefault("active", {}).setdefault(sid, {})
         target = rest[1]
         if target in ("off", "none", "-"):
-            rec.pop("scale_override", None)
-            save_json(SESSIONS_FILE, d)
+            def mutate(d): d.setdefault("active", {}).setdefault(sid, {}).pop("scale_override", None)
+            stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
             print(f"session {sid[:8]} scale cleared")
             return
         if target not in _scale_names():
             print(f"unknown scale '{target}'. available: {', '.join(_scale_names())}")
             return
-        rec["scale_override"] = target
-        save_json(SESSIONS_FILE, d)
+        def mutate(d): d.setdefault("active", {}).setdefault(sid, {})["scale_override"] = target
+        stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
         print(f"session {sid[:8]} scale → {target}")
         return
     if sub == "song":
@@ -663,29 +658,26 @@ def cmd_session(args):
             print("usage: claudio session song <id|index> <song-name|off>"); return
         sid = _resolve_session(rest[0])
         if not sid: print(f"no session matches '{rest[0]}'"); return
-        d = load_json(SESSIONS_FILE, {"active": {}})
-        rec = d.setdefault("active", {}).setdefault(sid, {})
         target = rest[1]
         if target in ("off", "none", "-"):
-            rec.pop("song_pinned", None)
-            save_json(SESSIONS_FILE, d)
+            def mutate(d): d.setdefault("active", {}).setdefault(sid, {}).pop("song_pinned", None)
+            stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
             print(f"session {sid[:8]} song cleared")
             return
         if not song_mod.has_song(target):
             print(f"unknown song '{target}'"); return
-        rec["song_pinned"] = target
-        save_json(SESSIONS_FILE, d)
+        def mutate(d): d.setdefault("active", {}).setdefault(sid, {})["song_pinned"] = target
+        stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
         print(f"session {sid[:8]} song → {target}")
         return
     if sub == "unpin":
         if not rest: print("usage: claudio session unpin <id|index>"); return
         sid = _resolve_session(rest[0])
         if not sid: print(f"no session matches '{rest[0]}'"); return
-        d = load_json(SESSIONS_FILE, {"active": {}})
-        if sid in d.get("active", {}):
-            d["active"][sid].pop("preset_pinned", None)
-            save_json(SESSIONS_FILE, d)
-            print(f"unpinned {sid[:8]}")
+        def mutate(d):
+            if sid in d.get("active", {}): d["active"][sid].pop("preset_pinned", None)
+        stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
+        print(f"unpinned {sid[:8]}")
         return
     print(f"unknown session subcommand: {sub}")
 
@@ -750,25 +742,27 @@ def cmd_rule(args):
             if idle_val < 30:
                 print(f"--idle-after below 30s is too jumpy; pick a higher value"); return
             new_rule["idle_after_s"] = idle_val
-        d = load_json(RULES_FILE, {"rules": []})
         # de-dup by pattern + time + idle (allow multiple rules for same pattern with different conditions)
         key = (new_rule["pattern"], new_rule.get("time"), new_rule.get("idle_after_s"))
-        rules = [r for r in d.get("rules", [])
-                 if (r.get("pattern"), r.get("time"), r.get("idle_after_s")) != key]
-        rules.append(new_rule)
-        d["rules"] = rules
-        save_json(RULES_FILE, d)
+        def mutate(d):
+            rules = [r for r in d.get("rules", [])
+                     if (r.get("pattern"), r.get("time"), r.get("idle_after_s")) != key]
+            rules.append(new_rule)
+            d["rules"] = rules
+        stateio.update_json(RULES_FILE, {"rules": []}, mutate)
         print(f"rule added:")
         print(_format_rule(new_rule))
         return
     if sub in ("rm", "remove"):
         if not rest: print("usage: claudio rule rm <pattern>"); return
         pattern = rest[0]
-        d = load_json(RULES_FILE, {"rules": []})
-        before = len(d.get("rules", []))
-        d["rules"] = [r for r in d.get("rules", []) if r.get("pattern") != pattern]
-        save_json(RULES_FILE, d)
-        print(f"removed {before - len(d['rules'])} rule(s) matching '{pattern}'")
+        removed = {"count": 0}
+        def mutate(d):
+            before = len(d.get("rules", []))
+            d["rules"] = [r for r in d.get("rules", []) if r.get("pattern") != pattern]
+            removed["count"] = before - len(d["rules"])
+        stateio.update_json(RULES_FILE, {"rules": []}, mutate)
+        print(f"removed {removed['count']} rule(s) matching '{pattern}'")
         return
     print(f"unknown rule subcommand: {sub}")
 
