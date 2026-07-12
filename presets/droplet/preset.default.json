@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "name": "droplet",
   "description": "Sibling of rainfall but with delay. A Lydian. Tiny single-note plucks with soft feedback echoes — like a stone dropped in still water. Sparse, no long pads.",
   "drone": null,

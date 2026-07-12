@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "name": "studio",
   "description": "The MIDI demo kit \u2014 drums, bass and soft synth. Built for the Jukebox: hand a track its drums, bass line and lead, then save your mix as a preset. Works as a (lively) room too.",
   "master_gain": 0.5,

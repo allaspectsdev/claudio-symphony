@@ -5,33 +5,71 @@ on:
   pull_request:
 
 jobs:
-  # Audio, hook-schema, concurrency, failure-routing, and localhost web
-  # security tests run without audio hardware or external players.
-  test:
+  python-versions:
+    name: Python ${{ matrix.python }} / Linux
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.9", "3.11", "3.13"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r requirements.txt
+      - run: python -m unittest discover -v
+        env:
+          CLAUDIO_HOME: ${{ runner.temp }}/claudio
+
+  cross-platform:
+    name: ${{ matrix.os }} / Python 3.11
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install numpy
+      - run: python -m pip install -r requirements.txt
       - run: python -m unittest discover -v
-      - run: node --check web/app.js
+        env:
+          CLAUDIO_HOME: ${{ runner.temp }}/claudio
 
-  # Guard: the macOS/POSIX-only primitives must live ONLY in audio.py. If any
-  # runtime file reintroduces one, the README's "audio is one module" promise
-  # is broken — fail loudly.
+  quality-and-render:
+    name: Schema, lint, browser, render smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r requirements.txt ruff
+      - run: python -m compileall -q .
+      - run: ruff check --select E9,F63,F7,F82 .
+      - run: python cli.py preset validate --all
+        env:
+          CLAUDIO_HOME: ${{ runner.temp }}/claudio
+      - run: node --check web/app.js
+      - name: Render one complete preset outside the checkout
+        run: python presets/meadow/render.py
+        env:
+          CLAUDIO_HOME: ${{ runner.temp }}/claudio
+          CLAUDIO_SAMPLES_DIR: ${{ runner.temp }}/render-smoke
+          CLAUDIO_PRESET_CONFIG: presets/meadow/preset.json
+      - name: Confirm renderer produced WAV files
+        shell: bash
+        run: test "$(find '${{ runner.temp }}/render-smoke' -name '*.wav' | wc -l)" -gt 0
+
   posix-ism-guard:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: No afplay / sh / pkill / env-spawn outside audio.py
+      - name: No process POSIX-isms outside audio.py
         run: |
-          # Match playback/process POSIX-isms, but ignore shebang lines (#!).
           if grep -nE '/usr/bin/afplay|/bin/sh|pkill|start_new_session|/usr/bin/open|/usr/bin/env|os\.execvp|os\.kill' \
                event.py cli.py drone.py webui.py tune.py | grep -vE '^[^:]+:[0-9]+:#!'; then
             echo "::error::A macOS/POSIX-only primitive leaked outside audio.py (see matches above)."

@@ -9,6 +9,12 @@ HERE = Path(__file__).resolve().parent.parent
 
 
 class HookManifestTests(unittest.TestCase):
+    def test_bootstrap_never_installs_python_packages(self):
+        source = (HERE / "bin" / "bootstrap.py").read_text()
+        self.assertNotIn("subprocess", source)
+        self.assertNotIn("PIP_MARK", source)
+        self.assertIn("did not install anything automatically", source)
+
     def test_plugin_hooks_are_async_bounded_and_exec_form(self):
         hooks = json.loads((HERE / "hooks" / "hooks.json").read_text())["hooks"]
         self.assertIn("PostToolUseFailure", hooks)

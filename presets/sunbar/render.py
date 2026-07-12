@@ -27,7 +27,7 @@ from synth import (SR, A4, freq, t_axis, adsr, soft_clip, lowpass_fft,
 
 import json as _json
 import synth as _synth
-_PRESET_CFG = _json.loads((HERE / "preset.json").read_text())
+_PRESET_CFG = _json.loads(Path(__import__("os").environ.get("CLAUDIO_PRESET_CONFIG", str(HERE / "preset.json"))).read_text())
 _REVERB_SCALE = float(_PRESET_CFG.get("reverb_scale", 1.0))
 _orig_reverb_stereo = _synth.reverb_stereo
 def reverb_stereo(mono, **kwargs):
@@ -35,7 +35,7 @@ def reverb_stereo(mono, **kwargs):
         kwargs["wet"] = max(0.0, min(1.0, float(kwargs["wet"]) * _REVERB_SCALE))
     return _orig_reverb_stereo(mono, **kwargs)
 
-OUT = HERE / "samples"
+OUT = Path(__import__("os").environ.get("CLAUDIO_SAMPLES_DIR", str(HERE / "samples")))
 
 
 # A real marimba/xylophone bar has a strong inharmonic partial near 4x (the

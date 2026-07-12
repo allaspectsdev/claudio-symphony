@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "name": "synthwave",
   "description": "Neon 80s kit — punchy kick, big gated-reverb snare, fat saw bass, a bright detuned lead, a plucky arp and a warm poly pad. Retro-future; made for the Jukebox.",
   "master_gain": 0.5,

@@ -1,0 +1,5 @@
+# Explicit setup dependency for sample synthesis and offline pitch conversion.
+numpy>=1.24
+
+# Python's curses module is built in on POSIX but packaged separately on Windows.
+windows-curses>=2.3; platform_system == "Windows"

@@ -35,11 +35,15 @@ except ImportError:
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import audio  # noqa: E402  (cross-platform playback + process helpers)
+import config_store  # noqa: E402
+import music  # noqa: E402
+import paths  # noqa: E402
+import preset_store  # noqa: E402
 import stateio  # noqa: E402
-PRESETS = HERE / "presets"
-STATE = HERE / "state"
-CONFIG = HERE / "config.json"
-SESSIONS_FILE = STATE / "sessions.json"
+PRESETS = paths.BUILTIN_PRESETS_DIR
+STATE = paths.STATE_DIR
+CONFIG = paths.CONFIG_FILE
+SESSIONS_FILE = paths.SESSIONS_FILE
 EVENT_PY = HERE / "event.py"
 
 def load_json(p, default):
@@ -49,11 +53,10 @@ def save_json(p, d):
     stateio.save_json(p, d)
 
 def list_preset_names():
-    if not PRESETS.exists(): return []
-    return sorted(d.name for d in PRESETS.iterdir() if (d / "preset.json").exists())
+    return preset_store.list_names()
 
 def list_samples(preset_name, voice_dir):
-    d = PRESETS / preset_name / "samples" / voice_dir
+    d = preset_store.sample_asset(preset_name, voice_dir)
     if not d.exists(): return []
     return sorted(p for p in d.iterdir() if p.suffix == ".wav")
 
@@ -66,13 +69,7 @@ class TuneUI:
     # Scale names (mirror SCALES in event.py — read at runtime to avoid drift).
     @staticmethod
     def _scale_names():
-        try:
-            sys.path.insert(0, str(HERE))
-            import event as _ev
-            return list(_ev.SCALES.keys())
-        except Exception:
-            return ["A_major", "A_pent", "A_lydian", "A_dorian", "A_aeolian",
-                    "A_in_sen", "A_phrygian", "A_lydian_pent", "A_yo", "A_hijaz"]
+        return list(music.SCALES)
 
     GRID_PRESETS = [(0.0625, "1/64"), (0.125, "1/32"), (0.25, "1/16"),
                     (0.5, "1/8"),     (1.0, "1/4"),    (2.0, "1/2"),
@@ -87,7 +84,7 @@ class TuneUI:
 
     def __init__(self, stdscr):
         self.stdscr = stdscr
-        self.config = load_json(CONFIG, {})
+        self.config = config_store.load(CONFIG)
         names = list_preset_names()
         self.preset_name = self.config.get("preset", "cathedral")
         if self.preset_name not in names and names:
@@ -111,7 +108,7 @@ class TuneUI:
         self.message_until = 0
 
     def _load_preset(self, name):
-        return load_json(PRESETS / name / "preset.json", {})
+        return preset_store.load(name, {})
 
     def status(self, m, dur=2.5):
         self.message = m
@@ -127,8 +124,7 @@ class TuneUI:
 
     # Every Claude Code hook event Claudio can sonify — always shown so any
     # event can be mapped even if the preset doesn't define it yet.
-    ALL_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
-                  "SubagentStop", "Stop", "SessionEnd", "Notification", "PreCompact"]
+    ALL_EVENTS = music.MAPPABLE_EVENTS
 
     def events_flat(self):
         rows = []
@@ -201,14 +197,14 @@ class TuneUI:
         rows.append(("quant grid", "quant_grid", grid, glabel))
 
         # song state — read from state/song.json
-        song_state = load_json(STATE / "song.json", {})
+        song_state = load_json(paths.SONG_STATE_FILE, {})
         active_song = song_state.get("global")
         rows.append(("active song", "song", active_song, active_song or "(off — Markov picker)"))
 
         return rows
 
     def _list_song_names(self):
-        d = HERE / "songs"
+        d = paths.SONGS_DIR
         if not d.exists(): return []
         return sorted(p.stem for p in d.iterdir() if p.suffix == ".json")
 
@@ -538,7 +534,7 @@ class TuneUI:
             self.config_dirty = True
         elif kind == "song":
             choices = [None] + self._list_song_names()
-            sf = STATE / "song.json"
+            sf = paths.SONG_STATE_FILE
             song_state = load_json(sf, {})
             cur = song_state.get("global")
             try: idx = choices.index(cur)
@@ -589,12 +585,13 @@ class TuneUI:
     def trigger_regen(self):
         """Run `python3 presets/<preset>/render.py` in the background. Tells the
         user to wait. Used to apply reverb_scale changes after save."""
-        rp = PRESETS / self.preset_name / "render.py"
-        if not rp.exists():
+        rp = preset_store.render_path(self.preset_name)
+        if rp is None or not rp.exists():
             self.status("no render.py for this preset"); return
         self.status(f"regenerating {self.preset_name} samples (background)...", dur=8.0)
         try:
-            audio.spawn_python(rp, detached=True)
+            audio.spawn_python(rp, detached=True,
+                               env=preset_store.renderer_env(self.preset_name))
         except Exception as e:
             self.status(f"regen failed: {e}")
             return
@@ -665,11 +662,11 @@ class TuneUI:
     def save(self):
         wrote = []
         if self.preset_dirty:
-            save_json(PRESETS / self.preset_name / "preset.json", self.preset)
+            preset_store.save(self.preset_name, self.preset)
             self.preset_dirty = False
             wrote.append(f"presets/{self.preset_name}/preset.json")
         if self.config_dirty:
-            save_json(CONFIG, self.config)
+            config_store.save(self.config, CONFIG)
             self.config_dirty = False
             wrote.append("config.json")
         self._saved_at = time.time()

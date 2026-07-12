@@ -45,11 +45,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Callable, List
 import stateio
+import paths
 
 HERE = Path(__file__).resolve().parent
-STATE = HERE / "state"
-LOGS = HERE / "logs"
-CACHE_DIR = STATE / "rate_cache"          # numpy pre-render cache (under gitignored state/)
+STATE = paths.STATE_DIR
+LOGS = paths.LOG_DIR
+CACHE_DIR = paths.RATE_CACHE_DIR
 PLAYERS_FILE = STATE / "players.json"     # persisted PIDs for cross-process stop_all
 AUDIO_LOG = LOGS / "audio.log"
 REC_ACTIVE = STATE / "recording" / "active.json"   # presence = a `claudio record` window is open
@@ -742,12 +743,16 @@ def terminate_pid(pid) -> None:
 
 
 def spawn_python(script, args=(), *, detached=False, stdin_bytes=None,
-                 capture=False, cwd=None, log_file=None, timeout=None):
+                 capture=False, cwd=None, log_file=None, timeout=None, env=None):
     """Replaces every ['/usr/bin/env','python3', ...] spawn: uses the running
     interpreter (sys.executable) and platform-correct detaching."""
     argv = [sys.executable, str(script), *map(str, args)]
+    child_env = None
+    if env:
+        child_env = os.environ.copy()
+        child_env.update({str(k): str(v) for k, v in env.items()})
     if detached:
-        kw = dict(stdin=subprocess.DEVNULL, close_fds=True)
+        kw = dict(stdin=subprocess.DEVNULL, close_fds=True, cwd=cwd, env=child_env)
         fh = None
         if log_file is not None:
             # Accept a path (we own its lifecycle) or an already-open handle.
@@ -765,7 +770,7 @@ def spawn_python(script, args=(), *, detached=False, stdin_bytes=None,
     if stdin_bytes is not None:
         p = subprocess.Popen(argv, stdin=subprocess.PIPE,
                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                             cwd=cwd)
+                             cwd=cwd, env=child_env)
         try:
             p.communicate(stdin_bytes, timeout=timeout)
         except Exception:
@@ -774,7 +779,7 @@ def spawn_python(script, args=(), *, detached=False, stdin_bytes=None,
             except Exception:
                 pass
         return p
-    return subprocess.run(argv, cwd=cwd, check=False,
+    return subprocess.run(argv, cwd=cwd, env=child_env, check=False,
                           stdout=(None if capture else subprocess.DEVNULL),
                           stderr=(None if capture else subprocess.DEVNULL))
 

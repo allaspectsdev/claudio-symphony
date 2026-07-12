@@ -21,11 +21,13 @@ Pure stdlib — small SMF parser inside, no external deps.
 import json, struct, time
 from pathlib import Path
 import stateio
+import config_store
+import paths
 
 HERE = Path(__file__).resolve().parent
-SONGS = HERE / "songs"
-STATE = HERE / "state"
-CONFIG = HERE / "config.json"
+SONGS = paths.SONGS_DIR
+STATE = paths.STATE_DIR
+CONFIG = paths.CONFIG_FILE
 
 
 # ---------- atomic JSON ----------
@@ -189,7 +191,7 @@ def has_song(name):
 
 # ---------- runtime state ----------
 
-STATE_FILE = STATE / "song.json"
+STATE_FILE = paths.SONG_STATE_FILE
 # state shape:
 #   {"global": "<name>" | null,
 #    "positions": {"<name>": int, ...},
@@ -297,7 +299,7 @@ def next_note(name):
 # `grid` is in beats (0.25 = 16th, 0.5 = 8th, 1.0 = quarter).
 
 def quant_settings():
-    cfg = _load(CONFIG, {})
+    cfg = config_store.load(CONFIG)
     q = cfg.get("quant") or {}
     return {
         "enabled": bool(q.get("enabled", False)),
@@ -313,7 +315,7 @@ def set_quant(enabled=None, bpm=None, grid=None):
         if bpm is not None:     q["bpm"] = max(20.0, min(300.0, float(bpm)))
         if grid is not None:    q["grid"] = max(0.0625, min(4.0, float(grid)))
         cfg["quant"] = q
-    cfg = stateio.update_json(CONFIG, {}, mutate)
+    cfg = config_store.update(mutate, CONFIG)
     q = cfg.get("quant") or {}
     return {"enabled": bool(q.get("enabled", False)), "bpm": float(q.get("bpm", 120.0)),
             "grid": float(q.get("grid", 0.5))}

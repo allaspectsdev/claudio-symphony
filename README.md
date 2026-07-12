@@ -16,11 +16,11 @@ It is **not** a notification system. It's a room your Claude session is happenin
 Install it as a Claude Code plugin — two lines, pasted right into Claude Code:
 
 ```
-/plugin marketplace add rmtbb/claudio-symphony
+/plugin marketplace add allaspectsdev/claudio-symphony
 /plugin install claudio-symphony
 ```
 
-The hooks wire themselves and your next session starts playing — no editing `settings.json`. Each preset renders its sounds the first time it's used, so switching rooms just works. One prerequisite: **Python 3 + numpy** (`pip install numpy`); Claudio tries to install numpy for you on first run, and **`claudio doctor`** verifies everything anytime. Prefer a hands-on setup, or not using plugins? See [Install](#-install).
+The hooks wire themselves — no editing `settings.json`. Install the one synthesis dependency explicitly with `python3 -m pip install numpy`, then run **`claudio setup`** once to render sounds. Hooks never install packages or access the network on your behalf, and **`claudio doctor`** verifies everything anytime. Prefer a hands-on setup, or not using plugins? See [Install](#-install).
 
 > **macOS / Linux.** The plugin hooks call `python3`, which is standard there. On Windows `python3` often isn't on PATH — use the [manual install](#-install) (or alias `python3`) for now.
 
@@ -165,20 +165,28 @@ Prefer buttons? Hit **● Rec** in `claudio web` — pick a length, optionally f
 Paste these into Claude Code:
 
 ```
-/plugin marketplace add rmtbb/claudio-symphony
+/plugin marketplace add allaspectsdev/claudio-symphony
 /plugin install claudio-symphony
 ```
 
-That's it — the hooks wire themselves, and on your next session Claudio renders the default room and starts playing. The `claudio` command is on your PATH (`claudio web` opens the console). One prerequisite: **Python 3 with numpy** (`pip install numpy`); if it's missing, Claudio drops a one-line note in `logs/SETUP_NEEDED.txt` telling you exactly that.
+The hooks wire themselves and the `claudio` command is on your PATH. Then install the synthesis dependency and render the sound library explicitly:
+
+```bash
+python3 -m pip install numpy
+claudio setup
+```
+
+Claudio's hooks never modify Python or install anything silently. If numpy is missing, a setup note is written to Claudio's platform log directory and `claudio doctor` prints the exact fix.
 
 > Prefer to drive it by hand, or not using plugins? Use the manual install below — just don't do both (you'd get double sounds).
 
 ### Manual
 
 ```bash
-git clone https://github.com/rmtbb/claudio-symphony.git
+git clone https://github.com/allaspectsdev/claudio-symphony.git
 cd claudio-symphony
-python3 install.py            # deps + render samples + write starter config
+python3 -m pip install -r requirements.txt
+./bin/claudio setup           # verify + migrate legacy data + render samples
 ./bin/claudio install         # adds hooks to ~/.claude/settings.json
 ```
 
@@ -194,7 +202,9 @@ Open a new Claude Code session and listen. That's it.
 - 🐍 Python 3.9+ with **numpy** — still the only Python dependency. (Players are auto-detected, never auto-installed.)
 - 💾 ~250 MB free for generated samples (one-time render, then static)
 
-Song-mode pitch micro-tuning is native on afplay/ffplay/mpv/sox; on volume-only backends (`pw-play`/`paplay`/Windows MediaPlayer) it's reproduced by an offline numpy pre-render (cached under `state/rate_cache/`), so it still works everywhere. The curses tuner (`claudio tune`) needs `pip install windows-curses` on Windows — or just use `claudio web`, which works everywhere.
+Song-mode pitch micro-tuning is native on afplay/ffplay/mpv/sox; on volume-only backends (`pw-play`/`paplay`/Windows MediaPlayer) it's reproduced by an offline numpy pre-render in Claudio's platform cache, so it still works everywhere. The requirements file installs `windows-curses` only on Windows; `claudio web` remains available everywhere.
+
+All mutable data lives outside the checkout in the platform-standard config, data, state, cache, and log directories. Set `CLAUDIO_HOME=/path` for a portable installation, or run `claudio migrate` to copy data from an older checkout-local installation without deleting the originals.
 
 Tip: add `alias claudio='~/path/to/claudio-symphony/bin/claudio'` to your shell profile (macOS/Linux). On Windows, run via `bin\claudio.cmd`.
 
@@ -206,6 +216,10 @@ Tip: add `alias claudio='~/path/to/claudio-symphony/bin/claudio'` to your shell 
 claudio status                          # what's installed and active
 claudio preset list                     # see all 40 presets
 claudio preset use cathedral            # switch live (no Claude restart)
+claudio preset diff cathedral           # inspect edits from the shipped baseline
+claudio preset undo cathedral           # undo the most recent preset edit
+claudio preset export cathedral room.json
+claudio preset import room.json my-room
 claudio off / claudio on                # silence everything / restore
 claudio web                             # the browser control panel
 claudio tune                            # interactive terminal tuner (TUI)

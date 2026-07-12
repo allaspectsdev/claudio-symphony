@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "name": "hum",
   "description": "Warm hand-bell ensemble. A major pentatonic. Polite, calming bells with a soft pluck for ticks. Like a tea ceremony in a sunlit room.",
   "drone": null,

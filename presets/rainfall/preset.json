@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "name": "rainfall",
   "description": "Sparse drops in a quiet room with rare long swells. Silence is the canvas.",
   "drone": null,

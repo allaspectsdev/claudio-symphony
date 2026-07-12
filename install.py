@@ -15,22 +15,22 @@ This will:
 
 Re-run any time to regenerate samples (existing samples are overwritten).
 """
-import sys, subprocess, os, json
+import sys, subprocess, os
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PRESETS = HERE / "presets"
-CONFIG = HERE / "config.json"
+sys.path.insert(0, str(HERE))
+import paths
+import preset_store
+import config_store
+
+PRESETS = paths.BUILTIN_PRESETS_DIR
+CONFIG = paths.CONFIG_FILE
 
 # Ships with these defaults. Mirrors the curator's working setup:
 # meadow as the default preset, master 0.55, drone fully off, quant primed
 # but disabled. Users can `claudio reset` to restore this exact state.
-DEFAULT_CONFIG = {
-    "preset": "meadow",
-    "master_gain": 0.55,
-    "drone_gain": 0.0,
-    "quant": {"enabled": False, "bpm": 120.0, "grid": 0.5},
-}
+DEFAULT_CONFIG = config_store.DEFAULT_CONFIG
 
 def step(msg):
     print(f"\n→ {msg}")
@@ -52,7 +52,6 @@ except ImportError:
     fatal("numpy not installed. Try: pip install numpy")
 
 step("Checking audio backend")
-sys.path.insert(0, str(HERE))
 import audio
 ok, fatal_if_missing, msg = audio.install_check()
 print("  " + msg)
@@ -74,25 +73,28 @@ if not ok:
     print("    Samples will still render; audio plays once a backend is installed.")
 
 step("Rendering presets")
+paths.migrate_legacy(include_large=True)
 preset_dirs = sorted(p for p in PRESETS.iterdir()
                      if (p / "render.py").exists())
 if not preset_dirs:
     fatal(f"No presets found under {PRESETS}/")
 for p in preset_dirs:
     print(f"  · {p.name} ...")
+    env = os.environ.copy()
+    env.update(preset_store.renderer_env(p.name))
     r = subprocess.run([sys.executable, str(p / "render.py")],
-                       cwd=str(p), capture_output=True, text=True)
+                       cwd=str(p), capture_output=True, text=True, env=env)
     if r.returncode != 0:
         print(r.stdout); print(r.stderr, file=sys.stderr)
         fatal(f"render failed for preset '{p.name}'")
-    n_wavs = sum(1 for _ in (p / "samples").rglob("*.wav"))
+    n_wavs = sum(1 for _ in preset_store.sample_output_dir(p.name).rglob("*.wav"))
     print(f"    {n_wavs} samples")
 
 step("Writing starter config (only if config.json doesn't exist)")
 if CONFIG.exists():
     print(f"  config.json already present — leaving it alone")
 else:
-    CONFIG.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n")
+    config_store.save(DEFAULT_CONFIG, CONFIG)
     print(f"  wrote {CONFIG.name} with preset={DEFAULT_CONFIG['preset']}, "
           f"master_gain={DEFAULT_CONFIG['master_gain']}, "
           f"drone_gain={DEFAULT_CONFIG['drone_gain']}")

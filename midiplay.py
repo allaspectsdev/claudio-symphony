@@ -32,8 +32,9 @@ import event as ev          # noqa: E402  sample selection + play() + recording 
 import song as song_mod     # noqa: E402  SMF parser + song library
 import timeline as tl       # noqa: E402  session timeline reader (replay source)
 import stateio              # noqa: E402
+import paths                # noqa: E402
 
-STATE = HERE / "state"
+STATE = paths.STATE_DIR
 PLAY_DIR = STATE / "midiplay"
 ACTIVE = PLAY_DIR / "active.json"          # presence = a performance is running
 PROGRESS = PLAY_DIR / "progress.json"      # frequently-updated playhead

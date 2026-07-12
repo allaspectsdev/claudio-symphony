@@ -13,7 +13,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 
 # Tell synth.py to write samples here, then import + run.
-os.environ["CLAUDIO_SAMPLES_DIR"] = str(HERE / "samples")
+os.environ.setdefault("CLAUDIO_SAMPLES_DIR", str(HERE / "samples"))
 sys.path.insert(0, str(ROOT))
 
 import synth  # noqa: E402
@@ -23,7 +23,7 @@ import synth  # noqa: E402
 # (rather than shadowing in render.py like the other presets) so that calls
 # inside gen_all() see the patched reverb_stereo.
 import json as _json
-_PRESET_CFG = _json.loads((HERE / "preset.json").read_text())
+_PRESET_CFG = _json.loads(Path(__import__("os").environ.get("CLAUDIO_PRESET_CONFIG", str(HERE / "preset.json"))).read_text())
 _REVERB_SCALE = float(_PRESET_CFG.get("reverb_scale", 1.0))
 _orig_reverb_stereo = synth.reverb_stereo
 def _patched_reverb_stereo(mono, **kwargs):

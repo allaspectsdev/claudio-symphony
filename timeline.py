@@ -12,11 +12,12 @@ Pure stdlib. midiplay.py replays these; webui.py + cli.py surface them.
 """
 import json, time
 from pathlib import Path
+import paths
 
 HERE = Path(__file__).resolve().parent
-STATE = HERE / "state"
+STATE = paths.STATE_DIR
 TIMELINE = STATE / "timeline"
-OUT_DIR = HERE / "recordings"
+OUT_DIR = paths.RECORDINGS_DIR
 
 
 def safe_sid(s):

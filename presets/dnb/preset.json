@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "name": "dnb",
   "description": "Drum & Bass kit — punchy breaks, a pure sine sub, a growling reese, minor stabs and an airy pad. Dark and fast; built for the Jukebox but a moody room too.",
   "master_gain": 0.5,

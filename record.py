@@ -17,13 +17,15 @@ Usage (also driven by cli.py and the web UI):
 import os, sys, json, time, wave, signal, subprocess
 from pathlib import Path
 import numpy as np
+import paths
+import preset_store
 
 HERE = Path(__file__).resolve().parent
-STATE = HERE / "state"
+STATE = paths.STATE_DIR
 REC_DIR = STATE / "recording"
 ACTIVE = REC_DIR / "active.json"
 EVENTS = REC_DIR / "events.jsonl"
-OUT_DIR = HERE / "recordings"
+OUT_DIR = paths.RECORDINGS_DIR
 
 SR = 44100
 DEFAULT_SECS = 30
@@ -37,7 +39,7 @@ TAIL_S = 8.0            # let the last sounds ring out past the window
 DRONE_REC_GAIN = 0.32
 DRONE_FADE_IN = 3.0
 DRONE_FADE_OUT = 5.0
-DRONE_SRC = HERE / "presets" / "cathedral" / "samples" / "drone.wav"
+DRONE_SRC = preset_store.sample_asset("cathedral", "drone.wav")
 
 # ---------- recording lifecycle (no numpy needed) ----------
 

@@ -25,10 +25,11 @@ def _drone_semis(cfg):
     off = _root_offset(cfg)
     if cfg.get("drone_chords"):
         try:
-            import event as ev          # sibling; lazy so a bare drone stays light
-            _, roots, _ = ev.resolve_chord()
-            if roots:
-                off += ((int(roots[0]) - 9 + 6) % 12) - 6   # nearest move off A
+            progression = cfg.get("progression") or {}
+            _, label = music.chord_step(progression)
+            chord = music.CHORDS.get(label)
+            if progression.get("enabled") and chord:
+                off += ((int(chord[1]) - 9 + 6) % 12) - 6   # nearest move off A
         except Exception:
             pass
     return max(-9, min(9, off))
@@ -36,10 +37,14 @@ def _drone_semis(cfg):
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import audio  # noqa: E402  (cross-platform playback backend)
-PRESETS = HERE / "presets"
-STATE = HERE / "state"
-LOGS = HERE / "logs"
-CONFIG = HERE / "config.json"
+import config_store  # noqa: E402
+import music  # noqa: E402
+import paths  # noqa: E402
+import preset_store  # noqa: E402
+PRESETS = paths.BUILTIN_PRESETS_DIR
+STATE = paths.STATE_DIR
+LOGS = paths.LOG_DIR
+CONFIG = paths.CONFIG_FILE
 PID_FILE = STATE / "drone.pid"
 ACTIVE_PRESET_FILE = STATE / "drone-preset.txt"
 HEARTBEAT_FILE = STATE / "heartbeat"
@@ -57,21 +62,13 @@ def log(msg):
         pass
 
 def read_config():
-    try:
-        if CONFIG.exists():
-            return json.loads(CONFIG.read_text())
-    except Exception:
-        pass
-    return {}
+    return config_store.load(CONFIG)
 
 def active_preset_name():
-    return read_config().get("preset", "cathedral")
+    return config_store.active_preset(CONFIG)
 
 def load_preset(name):
-    p = PRESETS / name / "preset.json"
-    if not p.exists(): return None
-    try: return json.loads(p.read_text())
-    except Exception: return None
+    return preset_store.load(name, None)
 
 def existing_pid_alive():
     if not PID_FILE.exists(): return None
@@ -108,7 +105,7 @@ def main():
         print(f"preset '{name}' has no continuous drone; nothing to play.", file=sys.stderr)
         sys.exit(0)
 
-    drone_path = PRESETS / name / "samples" / drone_file
+    drone_path = preset_store.sample_asset(name, drone_file)
     if not drone_path.exists():
         log(f"drone file missing: {drone_path}")
         sys.exit(1)

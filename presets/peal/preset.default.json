@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "name": "peal",
   "description": "A carillon of handbells ringing out joyously over a sunny village square. A low bourdon bell tolls the ground while mid and high handbells peal the melody and descant bright, struck and resonant with rich additive partials and long bright tails. A warm bell sings the sweet middle, tower-bells ping with shimmer, tiny top handbells flick and scatter with delay echoes, overlapping bell-tails bloom into a lush carillon wash, and a change-ringing tumble shimmers through interlocked rows. A damped handbell tap keeps the pulse and a bright treble-bell chirps a jubilant little accent up top. A major @ A=432, additive only, hall reverb, jubilant and celebratory — pure ringing happiness, never dreary.",
   "drone": null,

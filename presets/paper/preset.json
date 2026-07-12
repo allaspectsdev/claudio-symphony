@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "name": "paper",
   "description": "Micro-tactile minimal. A major pentatonic. Tiny taps, music-box notes, soft clicks. Almost no reverb, light delay for space. The quietest preset by design.",
   "drone": null,

@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "name": "firefly",
   "description": "Tiny upper-register sparkle bursts. A Lydian, very high. Sparks with soft delay echoes, gentle high glow. Bright like fireflies in a summer field.",
   "drone": null,

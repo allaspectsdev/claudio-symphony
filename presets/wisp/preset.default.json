@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "name": "wisp",
   "description": "Barely there. A Lydian. Pure sine tones with long delay tails, tiny noise pops, rare bell. The 'almost silent' preset — for very deep focus.",
   "drone": null,

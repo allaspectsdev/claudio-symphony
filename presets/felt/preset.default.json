@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "name": "felt",
   "description": "Felt piano. Single notes with light tape muffle. A major pentatonic. Boards-of-Canada-clean: warm and simple, never busy.",
   "drone": null,

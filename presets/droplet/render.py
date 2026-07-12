@@ -22,7 +22,7 @@ from synth import (SR, A4, freq, t_axis, adsr, soft_clip, lowpass_fft,
 # tune ALL voices' reverb in one shot without editing the call sites.
 import json as _json
 import synth as _synth
-_PRESET_CFG = _json.loads((HERE / "preset.json").read_text())
+_PRESET_CFG = _json.loads(Path(__import__("os").environ.get("CLAUDIO_PRESET_CONFIG", str(HERE / "preset.json"))).read_text())
 _REVERB_SCALE = float(_PRESET_CFG.get("reverb_scale", 1.0))
 _orig_reverb_stereo = _synth.reverb_stereo
 def reverb_stereo(mono, **kwargs):
@@ -31,7 +31,7 @@ def reverb_stereo(mono, **kwargs):
     return _orig_reverb_stereo(mono, **kwargs)
 
 
-OUT = HERE / "samples"
+OUT = Path(__import__("os").environ.get("CLAUDIO_SAMPLES_DIR", str(HERE / "samples")))
 
 
 def delay_line(x, delay_ms=380, feedback=0.32, mix=0.30):

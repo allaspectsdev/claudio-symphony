@@ -26,13 +26,13 @@ from synth import SR, freq, t_axis, adsr, soft_clip, lowpass_fft, reverb_stereo,
 
 import json as _json
 import synth as _synth
-_RS = float(_json.loads((HERE / "preset.json").read_text()).get("reverb_scale", 1.0))
+_RS = float(_json.loads(Path(__import__("os").environ.get("CLAUDIO_PRESET_CONFIG", str(HERE / "preset.json"))).read_text()).get("reverb_scale", 1.0))
 _orig = _synth.reverb_stereo
 def reverb_stereo(mono, **kw):
     if "wet" in kw: kw["wet"] = max(0.0, min(1.0, float(kw["wet"]) * _RS))
     return _orig(mono, **kw)
 
-OUT = HERE / "samples"
+OUT = Path(__import__("os").environ.get("CLAUDIO_SAMPLES_DIR", str(HERE / "samples")))
 for s in ("kick", "rim", "hat", "bass", "keys", "pad"):
     (OUT / s).mkdir(parents=True, exist_ok=True)
 rng = np.random.default_rng(4242)

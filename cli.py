@@ -11,10 +11,12 @@ Quick on/off
   toggle                           Flip between on and off
 
 Setup
+  setup                            Verify dependencies, migrate data, and render all presets
   install                          Add claudio hooks to ~/.claude/settings.json
   uninstall                        Remove claudio hooks from ~/.claude/settings.json
   status                           Show install + drone + preset state, hooks, sessions, songs, quant
   doctor [--fix]                   Preflight check (python/numpy/player/samples/hooks); --fix renders if needed
+  migrate                          Copy legacy checkout data into platform user directories
   start                            Start the drone daemon for the active preset (no-op if no drone)
   stop                             Stop the drone process and kill afplay
   drone [on|off|status]            Drone bed — always follows the live root note (~½s retune)
@@ -27,6 +29,12 @@ Presets
   preset current                   Print the active preset name
   preset use <name>|default        Switch global default preset (live: stops old drone, starts new)
   preset reset [name]              Restore a preset.json from its preset.default.json
+  preset validate [name|--all]     Validate preset schema and voice mappings
+  preset diff [name]               Show changes from the preset's baseline
+  preset history [name]            List automatic edit snapshots
+  preset undo [name]               Restore the most recent edit snapshot
+  preset export <name> <file>      Export portable, validated preset JSON
+  preset import <file> [name]      Import preset JSON into user data
   audition                         Hear every preset, optionally pick one (safe anytime)
 
 Per-session routing
@@ -131,15 +139,20 @@ import audio  # noqa: E402  (cross-platform playback + process helpers)
 import midiplay as midiplay_mod  # noqa: E402
 import timeline as timeline_mod  # noqa: E402
 import stateio  # noqa: E402
+import config_store  # noqa: E402
+import music  # noqa: E402
+import paths  # noqa: E402
+import preset_schema  # noqa: E402
+import preset_store  # noqa: E402
 
-PRESETS = HERE / "presets"
-STATE = HERE / "state"
-LOGS = HERE / "logs"
+PRESETS = paths.BUILTIN_PRESETS_DIR
+STATE = paths.STATE_DIR
+LOGS = paths.LOG_DIR
 SETTINGS = Path.home() / ".claude" / "settings.json"
 BACKUPS = Path.home() / ".claude" / "backups"
-CONFIG = HERE / "config.json"
-SESSIONS_FILE = STATE / "sessions.json"
-RULES_FILE = STATE / "rules.json"
+CONFIG = paths.CONFIG_FILE
+SESSIONS_FILE = paths.SESSIONS_FILE
+RULES_FILE = paths.RULES_FILE
 EVENT_PATH = str(HERE / "event.py")
 DRONE_PATH = str(HERE / "drone.py")
 TUNE_PATH = str(HERE / "tune.py")
@@ -147,11 +160,7 @@ PID_FILE = STATE / "drone.pid"
 
 MARKER = "__claudio_symphony__"
 
-HOOK_EVENTS = [
-    "SessionStart", "SessionEnd", "UserPromptSubmit", "Stop",
-    "PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStop",
-    "Notification", "PreCompact",
-]
+HOOK_EVENTS = music.HOOK_EVENTS
 
 # ---------- json helpers ----------
 
@@ -161,24 +170,17 @@ def load_json(p, default):
 def save_json(p, d):
     stateio.save_json(p, d)
 
-DEFAULT_PRESET = "meadow"
-DEFAULT_CONFIG = {
-    "preset": DEFAULT_PRESET,
-    "master_gain": 0.55,
-    "drone_gain": 0.0,
-    "quant": {"enabled": False, "bpm": 120.0, "grid": 0.5},
-}
+DEFAULT_PRESET = config_store.DEFAULT_PRESET
+DEFAULT_CONFIG = config_store.DEFAULT_CONFIG
 
-def load_config(): return load_json(CONFIG, {})
-def save_config(d): save_json(CONFIG, d)
-def active_preset_name(): return load_config().get("preset", DEFAULT_PRESET)
+def load_config(): return config_store.load(CONFIG)
+def save_config(d): return config_store.save(d, CONFIG)
+def active_preset_name(): return config_store.active_preset(CONFIG)
 def list_preset_names():
-    if not PRESETS.exists(): return []
-    return sorted(d.name for d in PRESETS.iterdir() if (d / "preset.json").exists())
+    return preset_store.list_names()
 def load_preset(name):
-    p = PRESETS / name / "preset.json"
-    return load_json(p, None) if p.exists() else None
-def save_preset(name, d): save_json(PRESETS / name / "preset.json", d)
+    return preset_store.load(name, None)
+def save_preset(name, d): preset_store.save(name, d)
 
 # ---------- settings.json hook install ----------
 
@@ -381,7 +383,7 @@ def cmd_doctor(args):
         line(False, "audio player", str(e))
     # 4. samples for the active preset
     name = active_preset_name()
-    sdir = PRESETS / name / "samples"
+    sdir = preset_store.sample_read_dir(name)
     wavs = list(sdir.rglob("*.wav")) if sdir.exists() else []
     line(bool(wavs), f"sounds for '{name}'", "" if wavs else f"not rendered yet → claudio regen {name}")
     # 5. config writable
@@ -402,21 +404,43 @@ def cmd_doctor(args):
         print("        ./bin/claudio install")
 
     if fix and not wavs and have_np:
-        render = PRESETS / name / "render.py"
-        if render.exists():
+        render = preset_store.render_path(name)
+        if render:
             print(f"\n→ rendering '{name}' …")
-            r = subprocess_run_render(render)
+            r = subprocess_run_render(render, name)
             print("  done." if r else "  render failed — see output above.")
 
     print("\n" + ("✓ all set — start (or restart) a Claude Code session and listen."
                   if ok else "✗ fix the ✗ items above, then run `claudio doctor` again."))
     return 0 if ok else 1
 
-def subprocess_run_render(render_path):
+def cmd_migrate(args):
+    result = paths.migrate_legacy(include_large=True)
+    print("Claudio user-data migration\n")
+    for key, count in result.items():
+        print(f"  {key:<18} {count} copied")
+    print(f"\n  config      {paths.CONFIG_DIR}")
+    print(f"  data        {paths.DATA_DIR}")
+    print(f"  cache       {paths.CACHE_DIR}")
+    print(f"  state       {paths.STATE_DIR}")
+    print("\nLegacy files were preserved; Claudio now reads and writes the locations above.")
+
+def cmd_setup(args):
+    """Run the explicit, foreground setup flow; never installs dependencies."""
+    import subprocess
+    result = subprocess.run([sys.executable, str(HERE / "install.py")], cwd=str(HERE))
+    if result.returncode:
+        print("\nSetup did not change your Python environment.")
+        print(f"Install dependencies explicitly with:\n  {sys.executable} -m pip install -r {HERE / 'requirements.txt'}")
+    return result.returncode
+
+def subprocess_run_render(render_path, preset_name=None):
     import subprocess
     try:
+        env = os.environ.copy()
+        env.update(preset_store.renderer_env(preset_name or Path(render_path).parent.name))
         r = subprocess.run([sys.executable, str(render_path)], cwd=str(HERE),
-                           capture_output=True, text=True, timeout=600)
+                           env=env, capture_output=True, text=True, timeout=600)
         if r.returncode != 0:
             print(r.stdout[-500:]); print(r.stderr[-500:], file=sys.stderr)
         return r.returncode == 0
@@ -483,6 +507,67 @@ def cmd_preset(args):
         return
     if args[0] in ("current", "show"):
         print(active_preset_name()); return
+    if args[0] == "validate":
+        targets = list_preset_names() if "--all" in args else [
+            args[1] if len(args) > 1 else active_preset_name()
+        ]
+        failed = 0
+        for name in targets:
+            preset = load_preset(name)
+            errors = ["preset document not found"] if preset is None else preset_schema.validate(preset)
+            if preset is not None and preset.get("name") != name:
+                errors.append(f"name: {preset.get('name')!r} does not match directory {name!r}")
+            if errors:
+                failed += 1
+                print(f"✗ {name}")
+                for error in errors:
+                    print(f"    {error}")
+            else:
+                print(f"✓ {name} (schema v{preset_schema.CURRENT_VERSION})")
+        print(f"\n{len(targets) - failed}/{len(targets)} presets valid")
+        return failed
+    if args[0] == "diff":
+        name = args[1] if len(args) > 1 else active_preset_name()
+        try:
+            diff = preset_store.diff_from_default(name)
+        except (ValueError, OSError, json.JSONDecodeError) as error:
+            print(f"could not diff preset: {error}"); return 1
+        print(diff or f"preset '{name}' matches its baseline")
+        return
+    if args[0] == "history":
+        name = args[1] if len(args) > 1 else active_preset_name()
+        entries = preset_store.history(name)
+        if not entries:
+            print(f"(no edit history for '{name}')"); return
+        for entry in entries:
+            stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry["timestamp"]))
+            print(f"  {entry['id']}  {stamp}  {entry['description']}")
+        return
+    if args[0] == "undo":
+        name = args[1] if len(args) > 1 else active_preset_name()
+        if preset_store.undo(name):
+            print(f"preset '{name}' restored to its previous edit")
+        else:
+            print(f"no edit history for '{name}'"); return 1
+        return
+    if args[0] == "export":
+        if len(args) < 3:
+            print("usage: claudio preset export <name> <file>"); return 1
+        try:
+            destination = preset_store.export_to(args[1], args[2])
+            print(f"exported '{args[1]}' → {destination}")
+        except (ValueError, OSError) as error:
+            print(f"export failed: {error}"); return 1
+        return
+    if args[0] == "import":
+        if len(args) < 2:
+            print("usage: claudio preset import <file> [name]"); return 1
+        try:
+            name = preset_store.import_from(args[1], args[2] if len(args) > 2 else None)
+            print(f"imported preset '{name}'")
+        except (ValueError, OSError, json.JSONDecodeError) as error:
+            print(f"import failed: {error}"); return 1
+        return
     if args[0] == "song":
         if len(args) < 3:
             print("usage: claudio preset song <preset> <song-name|off>"); return
@@ -512,7 +597,7 @@ def cmd_preset(args):
         name = args[1]
         if name == "default":
             name = DEFAULT_PRESET
-        if not (PRESETS / name / "preset.json").exists():
+        if load_preset(name) is None:
             print(f"unknown preset '{name}'. available: {', '.join(list_preset_names())}")
             return
         cfg = load_config()
@@ -532,13 +617,10 @@ def cmd_preset(args):
 # ---------- reset ----------
 
 def cmd_preset_reset(name):
-    src = PRESETS / name / "preset.default.json"
-    dst = PRESETS / name / "preset.json"
-    if not src.exists():
-        print(f"no shipped default for '{name}' (looking for {src.name})")
+    if not preset_store.reset(name):
+        print(f"no shipped default for '{name}' (looking for preset.default.json)")
         return
-    dst.write_bytes(src.read_bytes())
-    print(f"preset '{name}' restored from {src.name}")
+    print(f"preset '{name}' restored from preset.default.json")
 
 
 def cmd_reset(args):
@@ -563,7 +645,7 @@ def cmd_reset(args):
     save_config(dict(DEFAULT_CONFIG))
     print(f"config.json → shipped defaults")
     # song state
-    song_state = STATE / "song.json"
+    song_state = paths.SONG_STATE_FILE
     if song_state.exists(): song_state.unlink()
     print(f"song state cleared")
     # session pins
@@ -629,7 +711,7 @@ def cmd_session(args):
         sid = _resolve_session(rest[0])
         if not sid: print(f"no session matches '{rest[0]}'"); return
         preset = rest[1]
-        if not (PRESETS / preset / "preset.json").exists():
+        if load_preset(preset) is None:
             print(f"unknown preset '{preset}'"); return
         def mutate(d): d.setdefault("active", {}).setdefault(sid, {})["preset_pinned"] = preset
         stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
@@ -684,7 +766,7 @@ def cmd_session(args):
 def cmd_here(args):
     if not args: print("usage: claudio here <preset>"); return
     preset = args[0]
-    if not (PRESETS / preset / "preset.json").exists():
+    if load_preset(preset) is None:
         print(f"unknown preset '{preset}'"); return
     cwd = os.environ.get("CLAUDIO_CWD") or os.getcwd()
     cmd_rule(["add", cwd, preset])
@@ -726,7 +808,7 @@ def cmd_rule(args):
             print("usage: claudio rule add <pattern> <preset> [--time HH:MM-HH:MM] [--idle-after N]")
             return
         pattern, preset = positional[0], positional[1]
-        if not (PRESETS / preset / "preset.json").exists():
+        if load_preset(preset) is None:
             print(f"unknown preset '{preset}'"); return
         new_rule = {"pattern": pattern, "preset": preset}
         if time_val:
@@ -777,11 +859,11 @@ def _require_voice(preset, name):
 
 def _regen_voice(pname, vname):
     """Re-render a single voice's samples (used after a reverb change)."""
-    render = PRESETS / pname / "render.py"
-    if not render.exists():
+    render = preset_store.render_path(pname)
+    if render is None or not render.exists():
         print(f"  (preset '{pname}' has no render.py; reverb change saved but "
               f"samples not regenerated)"); return
-    audio.spawn_python(render, [vname])
+    audio.spawn_python(render, [vname], env=preset_store.renderer_env(pname))
 
 
 def cmd_voice(args):
@@ -850,7 +932,7 @@ def cmd_voice(args):
         # fire one trigger via event.py with a fake event that maps to this voice
         # easier: play a random sample directly via the audio backend
         import random
-        d = PRESETS / pname / "samples" / v.get("dir", name)
+        d = preset_store.sample_asset(pname, v.get("dir", name))
         samples = sorted(p for p in d.iterdir() if p.suffix == ".wav") if d.exists() else []
         if not samples: print(f"no samples in {d}"); return
         cfg = load_config()
@@ -936,16 +1018,16 @@ def cmd_drone_volume(v):
 
 def cmd_regen(args):
     name = args[0] if args else active_preset_name()
-    render = PRESETS / name / "render.py"
+    render = preset_store.render_path(name)
     legacy = HERE / "synth.py"
-    if render.exists():
-        audio.spawn_python(render)
+    if render is not None and render.exists():
+        audio.spawn_python(render, env=preset_store.renderer_env(name))
     elif name == "cathedral" and legacy.exists():
         # legacy synth writes into samples/ at top level; need to redirect
         # to presets/cathedral/samples — but this is rarely needed since
         # cathedral was bootstrapped already. Tell the user to use rainfall path.
         print(f"cathedral has no render.py; samples already rendered at "
-              f"{PRESETS / 'cathedral' / 'samples'}")
+              f"{preset_store.sample_read_dir('cathedral')}")
     else:
         print(f"no renderer for preset '{name}'")
 
@@ -1319,11 +1401,8 @@ def cmd_grid(args):
 
 # ---------- scale override ----------
 
-# Imports SCALES dict from event.py — single source of truth.
 def _scale_names():
-    sys.path.insert(0, str(HERE))
-    import event as _ev
-    return list(_ev.SCALES.keys())
+    return list(music.SCALES)
 
 
 def cmd_scale(args):
@@ -1402,12 +1481,11 @@ def cmd_root(args):
 def cmd_chords(args):
     """Cycle the room through a chord progression (wall-clock, no daemon).
     Usage: claudio chords [show|list|off|use <preset>|every <sec>|<chords…>]"""
-    import event as _ev
     def _show():
         prog = load_config().get("progression") or {}
         if not prog.get("enabled") or not prog.get("steps"):
             print("chords: off"); return
-        i, label = _ev.chord_step(prog)
+        i, label = music.chord_step(prog)
         steps = prog["steps"]
         line = "  ".join(f"[{s}]" if j == i else f" {s} " for j, s in enumerate(steps))
         print(f"chords: {line}   (every {prog.get('step_s', 8):g}s, now: {label})")
@@ -1415,9 +1493,9 @@ def cmd_chords(args):
         _show(); return
     sub = args[0]
     if sub in ("list", "ls"):
-        for name, steps in _ev.PROGRESSIONS.items():
+        for name, steps in music.PROGRESSIONS.items():
             print(f"  {name:<12} {' – '.join(steps)}")
-        print(f"  chords available for custom: {', '.join(sorted(_ev.CHORDS))}")
+        print(f"  chords available for custom: {', '.join(sorted(music.CHORDS))}")
         return
     cfg = load_config(); prog = cfg.get("progression") or {}
     if sub in ("off", "stop", "disable"):
@@ -1429,16 +1507,16 @@ def cmd_chords(args):
         cfg["progression"] = prog; save_config(cfg)
         print(f"chord length → {prog['step_s']:g}s"); _show(); return
     if sub == "use" and len(args) > 1: sub, args = args[1], args[1:]
-    if sub in _ev.PROGRESSIONS:
-        prog.update(preset=sub, steps=list(_ev.PROGRESSIONS[sub]), enabled=True)
+    if sub in music.PROGRESSIONS:
+        prog.update(preset=sub, steps=list(music.PROGRESSIONS[sub]), enabled=True)
         cfg["progression"] = prog; save_config(cfg); _show(); return
     # custom: a list of chord names, e.g. `claudio chords A E F#m D`
-    steps = [a for a in args if a in _ev.CHORDS]
+    steps = [a for a in args if a in music.CHORDS]
     if len(steps) >= 2:
         prog.update(preset="custom", steps=steps, enabled=True)
         cfg["progression"] = prog; save_config(cfg); _show(); return
-    print(f"unknown progression '{sub}'. presets: {', '.join(_ev.PROGRESSIONS)}; "
-          f"or give 2+ chords from: {', '.join(sorted(_ev.CHORDS))}")
+    print(f"unknown progression '{sub}'. presets: {', '.join(music.PROGRESSIONS)}; "
+          f"or give 2+ chords from: {', '.join(sorted(music.CHORDS))}")
 
 
 # ---------- preset reverb scale ----------
@@ -1796,16 +1874,18 @@ def main(argv):
     if not argv: argv = ["status"]
     cmd = argv[0]; args = argv[1:]
     if   cmd == "install":              cmd_install()
+    elif cmd == "setup":                sys.exit(cmd_setup(args))
     elif cmd == "uninstall":            cmd_uninstall()
     elif cmd == "start":                cmd_start()
     elif cmd == "stop":                 cmd_stop()
     elif cmd == "drone":                cmd_drone(args)
     elif cmd in ("doctor", "check"):    sys.exit(cmd_doctor(args))
+    elif cmd == "migrate":              cmd_migrate(args)
     elif cmd == "status":               cmd_status()
     elif cmd == "test":                 cmd_test(args[0] if args else None)
     elif cmd == "volume" and args:      cmd_volume(args[0])
     elif cmd == "drone-volume" and args:cmd_drone_volume(args[0])
-    elif cmd == "preset":               cmd_preset(args)
+    elif cmd == "preset":               sys.exit(cmd_preset(args) or 0)
     elif cmd == "regen":                cmd_regen(args)
     elif cmd == "sessions":             cmd_sessions()
     elif cmd == "session":              cmd_session(args)

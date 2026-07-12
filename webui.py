@@ -18,20 +18,24 @@ from http.cookies import SimpleCookie
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import audio  # noqa: E402  (cross-platform playback + process helpers)
+import config_store  # noqa: E402
+import music  # noqa: E402
+import paths  # noqa: E402
+import preset_store  # noqa: E402
 import stateio  # noqa: E402  (cross-process JSON transactions)
-PRESETS = HERE / "presets"
-STATE = HERE / "state"
-CONFIG = HERE / "config.json"
-RULES_FILE = STATE / "rules.json"
-SESSIONS_FILE = STATE / "sessions.json"
+PRESETS = paths.BUILTIN_PRESETS_DIR
+STATE = paths.STATE_DIR
+CONFIG = paths.CONFIG_FILE
+RULES_FILE = paths.RULES_FILE
+SESSIONS_FILE = paths.SESSIONS_FILE
 EVENT_PY = str(HERE / "event.py")
 RECORD_PY = str(HERE / "record.py")
 MIDIPLAY_PY = str(HERE / "midiplay.py")
 REC_DIR = STATE / "recording"
 REC_ACTIVE = REC_DIR / "active.json"
 REC_EVENTS = REC_DIR / "events.jsonl"
-OUT_DIR = HERE / "recordings"
-WEB = HERE / "web"
+OUT_DIR = paths.RECORDINGS_DIR
+WEB = paths.WEB_DIR
 SR_HINT = 44100
 AUTH_COOKIE = "claudio_session"
 AUTH_TOKEN = secrets.token_urlsafe(32)
@@ -68,18 +72,11 @@ except Exception:
     timeline_mod = None
 
 # A-rooted scales (mirrors event.py SCALES keys) — for the global/per-session override.
-SCALE_NAMES = ["A_major", "A_pent", "A_lydian", "A_lydian_pent", "A_dorian",
-               "A_aeolian", "A_in_sen", "A_phrygian", "A_yo", "A_hijaz"]
+SCALE_NAMES = list(music.SCALES)
 
 # Chord progressions (mirrors event.py CHORDS keys / PROGRESSIONS).
-CHORD_NAMES = ["A", "Am", "B", "Bm", "C", "C#m", "D", "Dm", "E", "Em", "F", "F#m", "G"]
-PROGRESSION_PRESETS = {
-    "pop":        ["A", "E", "F#m", "D"],
-    "doo_wop":    ["A", "F#m", "D", "E"],
-    "andalusian": ["Am", "G", "F", "E"],
-    "canon":      ["A", "E", "F#m", "C#m", "D", "A", "D", "E"],
-    "lofi":       ["Bm", "E", "A", "F#m"],
-}
+CHORD_NAMES = list(music.CHORDS)
+PROGRESSION_PRESETS = music.PROGRESSIONS
 
 # ---------- json + domain helpers (mirror cli.py, no import side effects) ----------
 
@@ -89,20 +86,19 @@ def load_json(p, default):
 def save_json(p, d):
     stateio.save_json(p, d)
 
-def load_config(): return load_json(CONFIG, {})
-def save_config(d): save_json(CONFIG, d)
-def update_config(mutator): return stateio.update_json(CONFIG, {}, mutator)
+def load_config(): return config_store.load(CONFIG)
+def save_config(d): return config_store.save(d, CONFIG)
+def update_config(mutator): return config_store.update(mutator, CONFIG)
 def patch_config(values=None, remove=()):
     def mutate(cfg):
         cfg.update(values or {})
         for key in remove:
             cfg.pop(key, None)
     return update_config(mutate)
-def active_preset_name(): return load_config().get("preset", "meadow")
+def active_preset_name(): return config_store.active_preset(CONFIG)
 
 def list_preset_names():
-    if not PRESETS.exists(): return []
-    return sorted(d.name for d in PRESETS.iterdir() if (d / "preset.json").exists())
+    return preset_store.list_names()
 
 def safe_child(root, relative):
     """Resolve ``relative`` below ``root`` or return None on traversal."""
@@ -115,33 +111,35 @@ def safe_child(root, relative):
         return None
 
 def preset_path(name, leaf="preset.json"):
-    if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name):
-        return None
-    return safe_child(PRESETS, Path(name) / leaf)
+    if leaf == "preset.json":
+        return preset_store.preset_path(name)
+    if leaf == "preset.default.json":
+        return preset_store.default_path(name)
+    if leaf == "render.py":
+        return preset_store.render_path(name)
+    directory = preset_store.source_dir(name)
+    return safe_child(directory, leaf) if directory else None
 
 def load_preset(name):
-    p = preset_path(name)
-    return load_json(p, None) if p else None
+    return preset_store.load(name)
 
 def save_preset(name, d):
-    p = preset_path(name)
-    if p is None:
-        raise ValueError("invalid preset name")
-    save_json(p, d)
+    return preset_store.save(name, d)
 
 def clamp(x, lo, hi): return max(lo, min(hi, x))
 
-ALL_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
-              "SubagentStop", "Stop", "SessionEnd", "Notification", "PreCompact"]
+ALL_EVENTS = music.MAPPABLE_EVENTS
 
 # ---------- audio (play on the host, like Claudio itself) ----------
 
 def voice_dir(preset, voice):
     cfg = (load_preset(preset) or {}).get("voices", {}).get(voice, {})
-    base = preset_path(preset, "samples")
-    if base is None:
-        return PRESETS / "__invalid__"
-    return safe_child(base, cfg.get("dir", voice)) or (PRESETS / "__invalid__")
+    return preset_store.sample_asset(preset, cfg.get("dir", voice))
+
+def voice_output_dir(preset, voice):
+    cfg = (load_preset(preset) or {}).get("voices", {}).get(voice, {})
+    base = preset_store.sample_output_dir(preset)
+    return safe_child(base, cfg.get("dir", voice)) or (paths.SAMPLES_DIR / "__invalid__")
 
 def samples_in(d):
     return sorted(p for p in d.iterdir() if p.suffix == ".wav") if d.exists() else []
@@ -171,7 +169,7 @@ def regen_voice(preset, voice):
     if render is None or not render.exists(): return False, "no render.py for this preset"
     def _run():
         try:
-            audio.spawn_python(render, [voice], cwd=str(HERE))
+            audio.spawn_python(render, [voice], cwd=str(HERE), env=preset_store.renderer_env(preset))
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
@@ -330,7 +328,7 @@ def create_custom_preset(spec):
     name = _slug(spec.get("name", ""))
     if len(name) < 2:
         return {"ok": False, "msg": "name must be at least 2 letters/digits"}
-    if name in _RESERVED_NAMES or name in list_preset_names() or (PRESETS / name).exists():
+    if name in _RESERVED_NAMES or name in list_preset_names():
         return {"ok": False, "msg": f"'{name}' already exists — pick another name"}
     base = spec.get("base")
     picks = spec.get("voices") or []
@@ -339,7 +337,7 @@ def create_custom_preset(spec):
     if not base and not picks:
         return {"ok": False, "msg": "pick at least one sound (or start from a preset)"}
 
-    target = PRESETS / name
+    target = preset_store.user_dir(name)
     try:
         (target / "samples").mkdir(parents=True, exist_ok=False)
     except Exception:
@@ -352,16 +350,18 @@ def create_custom_preset(spec):
             # copy the base's sample folders
             for vn, vc in (preset.get("voices", {}) or {}).items():
                 d = vc.get("dir", vn)
-                src = PRESETS / base / "samples" / d
+                src = preset_store.sample_asset(base, d)
                 if src.exists():
                     shutil.copytree(src, target / "samples" / d, dirs_exist_ok=True)
             preset["description"] = spec.get("description") or f"custom · from {base}"
         else:
-            preset = {"description": spec.get("description") or "custom preset",
+            preset = {"schema_version": 1, "name": name,
+                      "description": spec.get("description") or "custom preset",
                       "master_gain": 0.5, "voices": {}, "events": {}}
+        preset["name"] = name
         preset["custom"] = True                          # marks it user-built (deletable/renamable)
-            # blank: no scale_pitches → the picker uses each voice's full sample set,
-            # which is the safe choice for a mixed bag of borrowed sounds.
+        # blank: no scale_pitches → the picker uses each voice's full sample set,
+        # which is the safe choice for a mixed bag of borrowed sounds.
 
         voices = preset.setdefault("voices", {})
         added = []
@@ -396,8 +396,7 @@ def create_custom_preset(spec):
             for i, ev in enumerate(ALL_EVENTS):
                 evmap[ev] = {"default": vlist[i % len(vlist)]}
 
-        save_json(target / "preset.json", preset)
-        save_json(target / "preset.default.json", preset)   # so "reset preset" works
+        preset_store.save(name, preset, save_default=True)   # custom reset baseline
         return {"ok": True, "name": name, "voices": list(voices.keys()), "added": added}
     except Exception as e:
         shutil.rmtree(target, ignore_errors=True)
@@ -412,7 +411,7 @@ def delete_custom_preset(name):
     if not _is_custom(name):
         return {"ok": False, "msg": "only presets you built can be deleted"}
     # if it's the global default, fall back to meadow
-    fallback = "meadow" if (PRESETS / "meadow").exists() else (list_preset_names() or ["meadow"])[0]
+    fallback = "meadow" if load_preset("meadow") else (list_preset_names() or ["meadow"])[0]
     def update_active(cfg):
         if cfg.get("preset") == name:
             cfg["preset"] = fallback
@@ -428,7 +427,7 @@ def delete_custom_preset(name):
         stateio.update_json(RULES_FILE, {"rules": []},
                             lambda rj: rj.update(rules=[r for r in rj.get("rules", []) if r.get("preset") != name]))
     except Exception: pass
-    shutil.rmtree(PRESETS / name, ignore_errors=True)
+    preset_store.delete_custom(name)
     shutil.rmtree(STATE / name, ignore_errors=True)
     return {"ok": True, "name": name}
 
@@ -442,10 +441,11 @@ def rename_custom_preset(name, to):
         return {"ok": False, "msg": "new name must be at least 2 letters/digits"}
     if to == name:
         return {"ok": True, "name": to}
-    if to in _RESERVED_NAMES or to in list_preset_names() or (PRESETS / to).exists():
+    if to in _RESERVED_NAMES or to in list_preset_names():
         return {"ok": False, "msg": f"'{to}' already exists"}
     try:
-        (PRESETS / name).rename(PRESETS / to)
+        if not preset_store.rename_custom(name, to):
+            raise OSError("preset store rejected rename")
     except Exception as e:
         return {"ok": False, "msg": f"rename failed: {e}"}
     if (STATE / name).exists():
@@ -482,7 +482,7 @@ def swap_voice_sound(preset, voice, src_preset, src_voice):
     if not samples_in(srcdir):
         return {"ok": False, "msg": "source has no samples"}
     cfg = p["voices"][voice]
-    vdir = voice_dir(preset, voice)
+    vdir = voice_output_dir(preset, voice)
     try:
         vdir.mkdir(parents=True, exist_ok=True)
         for f in vdir.glob("*.wav"):            # clear old sound
@@ -686,6 +686,13 @@ class Handler(BaseHTTPRequestHandler):
             name = (q.get("name") or [active_preset_name()])[0]
             d = preset_detail(name)
             return self._send(200, d) if d else self._send(404, {"error": "not found"})
+        if path == "/api/preset/history":
+            name = (q.get("name") or [active_preset_name()])[0]
+            if load_preset(name) is None:
+                return self._send(404, {"error": "not found"})
+            entries = [{k: v for k, v in entry.items() if k != "path"}
+                       for entry in preset_store.history(name)]
+            return self._send(200, {"name": name, "history": entries})
         if path == "/api/activity":
             name = (q.get("name") or [active_preset_name()])[0]
             data = activity(name)
@@ -895,11 +902,15 @@ class Handler(BaseHTTPRequestHandler):
                 name = b.get("name", active_preset_name())
                 render = preset_path(name, "render.py")
                 if render and render.exists():
-                    threading.Thread(target=lambda: audio.spawn_python(render, cwd=str(HERE)),
+                    threading.Thread(target=lambda: audio.spawn_python(
+                        render, cwd=str(HERE), env=preset_store.renderer_env(name)),
                                      daemon=True).start()
                 return self._send(200, {"ok": bool(render and render.exists())})
             if path == "/api/preset/reset":
                 return self._preset_reset(b)
+            if path == "/api/preset/undo":
+                name = b.get("name", active_preset_name())
+                return self._send(200, {"ok": preset_store.undo(name), "name": name})
             if path == "/api/test":
                 fire_test(b.get("name"))
                 return self._send(200, {"ok": True})
@@ -972,7 +983,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _voice(self, b):
         preset = b.get("preset", active_preset_name())
-        path = preset_path(preset)
+        path = preset_store.preset_path(preset)
         if path is None or load_preset(preset) is None:
             return self._send(400, {"error": "unknown preset"})
         field = b["field"]
@@ -988,12 +999,12 @@ class Handler(BaseHTTPRequestHandler):
                 v["rate_jitter"] = True
             else:
                 v.pop("rate_jitter", None)
-        stateio.update_json(path, {}, mutate)
+        preset_store.update(preset, mutate)
         return self._send(200, {"ok": True})
 
     def _voice_reverb(self, b):
         preset = b.get("preset", active_preset_name())
-        path = preset_path(preset)
+        path = preset_store.preset_path(preset)
         if path is None or load_preset(preset) is None:
             return self._send(400, {"error": "unknown preset"})
         def mutate(p):
@@ -1001,13 +1012,13 @@ class Handler(BaseHTTPRequestHandler):
             rv["wet"] = round(clamp(float(b["wet"]), 0, 1), 3)
             if b.get("decay") is not None: rv["decay"] = round(clamp(float(b["decay"]), 0.1, 8), 2)
             if b.get("brightness") is not None: rv["brightness"] = round(clamp(float(b["brightness"]), 0, 1), 2)
-        stateio.update_json(path, {}, mutate)
+        preset_store.update(preset, mutate)
         ok, msg = regen_voice(preset, b["voice"])
         return self._send(200, {"ok": True, "regen": ok, "msg": msg})
 
     def _voice_delay(self, b):
         preset = b.get("preset", active_preset_name())
-        path = preset_path(preset)
+        path = preset_store.preset_path(preset)
         if path is None or load_preset(preset) is None:
             return self._send(400, {"error": "unknown preset"})
         def mutate(p):
@@ -1019,12 +1030,12 @@ class Handler(BaseHTTPRequestHandler):
                 d["ms"] = int(clamp(float(b["ms"]), 40, 2000))
                 d["feedback"] = round(clamp(float(b.get("feedback", d.get("feedback", 0.30))), 0, 0.85), 2)
                 d["count"] = int(clamp(float(b.get("count", d.get("count", 3))), 1, 8))
-        stateio.update_json(path, {}, mutate)
+        preset_store.update(preset, mutate)
         return self._send(200, {"ok": True})  # live, no regen
 
     def _map(self, b):
         preset = b.get("preset", active_preset_name())
-        path = preset_path(preset); ev = b["event"]; key = b.get("key", "default")
+        path = preset_store.preset_path(preset); ev = b["event"]; key = b.get("key", "default")
         current = load_preset(preset)
         if path is None or current is None:
             return self._send(400, {"error": "unknown preset"})
@@ -1048,20 +1059,21 @@ class Handler(BaseHTTPRequestHandler):
                 bt = spec.setdefault("by_tool", {})
                 if voice is None: bt.pop(key, None)
                 else: bt[key] = voice
-        stateio.update_json(path, {}, mutate)
+        preset_store.update(preset, mutate)
         return self._send(200, {"ok": True})
 
     def _reverb_scale(self, b):
         preset = b.get("preset", active_preset_name())
-        path = preset_path(preset)
+        path = preset_store.preset_path(preset)
         if path is None or load_preset(preset) is None:
             return self._send(400, {"error": "unknown preset"})
-        stateio.update_json(path, {},
+        preset_store.update(preset,
                             lambda p: p.update(reverb_scale=round(clamp(float(b["value"]), 0, 2), 3)))
         # full regen in background
         render = preset_path(preset, "render.py")
         if render and render.exists():
-            threading.Thread(target=lambda: audio.spawn_python(render, cwd=str(HERE)),
+            threading.Thread(target=lambda: audio.spawn_python(
+                render, cwd=str(HERE), env=preset_store.renderer_env(preset)),
                              daemon=True).start()
         return self._send(200, {"ok": True, "regen": bool(render and render.exists())})
 
@@ -1119,9 +1131,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _preset_reset(self, b):
         name = b["name"]
-        default = preset_path(name, "preset.default.json")
-        if default and default.exists():
-            save_preset(name, json.loads(default.read_text()))
+        if preset_store.reset(name):
             return self._send(200, {"ok": True, "msg": "restored from default"})
         return self._send(200, {"ok": False, "msg": "no preset.default.json for this preset"})
 

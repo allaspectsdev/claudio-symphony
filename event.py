@@ -23,12 +23,16 @@ import song as song_mod  # noqa: E402  (sibling module, must come after sys.path
 import audio  # noqa: E402  (cross-platform playback backend; same path insert)
 import timeline as timeline_mod  # noqa: E402  (owns the timeline dir + safe_sid; reader must match this writer)
 import stateio  # noqa: E402  (cross-process JSON transactions)
-PRESETS = HERE / "presets"
-STATE = HERE / "state"
-LOGS = HERE / "logs"
-CONFIG = HERE / "config.json"
-SESSIONS_FILE = STATE / "sessions.json"
-RULES_FILE = STATE / "rules.json"
+import config_store  # noqa: E402
+import music  # noqa: E402
+import paths  # noqa: E402
+import preset_store  # noqa: E402
+PRESETS = paths.BUILTIN_PRESETS_DIR
+STATE = paths.STATE_DIR
+LOGS = paths.LOG_DIR
+CONFIG = paths.CONFIG_FILE
+SESSIONS_FILE = paths.SESSIONS_FILE
+RULES_FILE = paths.RULES_FILE
 LOG = LOGS / "event.log"
 TIMELINE = timeline_mod.TIMELINE                      # shared with timeline.py so writer/reader can't drift
 TIMELINE_MAX_EVENTS = 20000                          # cap a marathon session's file growth
@@ -83,7 +87,7 @@ def _load(p, default):
 def _save(p, d):
     stateio.save_json(p, d, indent=2, newline=False)
 
-def read_config(): return _load(CONFIG, {})
+def read_config(): return config_store.load(CONFIG)
 
 def root_offset(cfg=None):
     """Global live transpose in semitones off A (the rendered root), clamped to
@@ -103,8 +107,8 @@ def load_preset(name):
     if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name):
         log(f"invalid preset name: {name!r}")
         return None
-    p = PRESETS / name / "preset.json"
-    if not p.exists():
+    p = preset_store.preset_path(name)
+    if p is None:
         log(f"preset.json missing for {name}")
         return None
     try:
@@ -118,11 +122,10 @@ def ensure_rendered(name):
     not shipped, so the first time a preset is needed without them we kick ONE
     detached render (via audio, which uses the running interpreter) and return
     False so this event stays silent — later events play once it lands. Fast
-    path: a `.rendered` marker short-circuits the filesystem scan after success."""
-    sd = PRESETS / name / "samples"
+    path scans for a WAV before treating the preset as ready; the marker remains
+    diagnostic state rather than a potentially stale source of truth."""
+    sd = preset_store.sample_read_dir(name)
     sdir = preset_state_dir(name)
-    if (sdir / ".rendered").exists():
-        return True
     if sd.is_dir() and next(sd.rglob("*.wav"), None) is not None:
         try: (sdir / ".rendered").write_text("1")
         except Exception: pass
@@ -139,11 +142,12 @@ def ensure_rendered(name):
             except Exception:
                 fresh = spawn_mark.exists()
             if not fresh:
-                render = PRESETS / name / "render.py"
-                if not render.exists():
+                render = preset_store.render_path(name)
+                if render is None:
                     return False
                 spawn_mark.write_text(str(time.time()))
-                audio.spawn_python(str(render), cwd=str(HERE), detached=True)
+                audio.spawn_python(str(render), cwd=str(HERE), detached=True,
+                                   env=preset_store.renderer_env(name))
     except Exception as e:
         log(f"render spawn failed for {name}: {e}")
     return False
@@ -263,12 +267,7 @@ def list_samples(preset_name, voice_dir):
     call it per note — caching avoids re-scanning the directory every note.
     Keyed on dir mtime so adding/removing samples invalidates; a regen that
     rewrites same-named WAVs keeps paths valid (audio reads content at play time)."""
-    base = (PRESETS / preset_name / "samples").resolve()
-    try:
-        d = (base / str(voice_dir)).resolve()
-        d.relative_to(base)
-    except (OSError, ValueError):
-        return []
+    d = preset_store.sample_asset(preset_name, str(voice_dir))
     try:
         mtime = d.stat().st_mtime
     except OSError:
@@ -301,50 +300,10 @@ _MIDI_PATTERN = re.compile(r'_m(\d+)\.wav$')
 # pcs = which pitch classes (mod 12) belong to this scale.
 # roots = preferred phrase landings (typically tonic + dominant).
 # All A-rooted so switching mid-session stays continuous with the shipping presets.
-SCALES = {
-    "A_major":         ([9, 11, 1, 2, 4, 6, 8],          [9, 4]),    # A B C# D E F# G#
-    "A_pent":          ([9, 11, 1, 4, 6],                [9, 4]),    # A B C# E F#
-    "A_lydian":        ([9, 11, 1, 3, 4, 6, 8],          [9, 4]),    # A B C# D# E F# G#
-    "A_lydian_pent":   ([9, 11, 1, 3, 6],                [9, 6]),    # A B C# D# F#
-    "A_dorian":        ([9, 11, 0, 2, 4, 6, 7],          [9, 4]),    # A B C D E F# G
-    "A_aeolian":       ([9, 11, 0, 2, 4, 5, 7],          [9, 4]),    # A B C D E F G
-    "A_in_sen":        ([9, 10, 0, 4, 5],                [9, 4]),    # A Bb C E F
-    "A_phrygian":      ([9, 10, 0, 2, 4, 5, 7],          [9, 4]),    # A Bb C D E F G
-    "A_yo":            ([9, 11, 2, 4, 7],                [9, 4]),    # A B D E G — Japanese major-pent
-    "A_hijaz":         ([9, 10, 1, 2, 4, 5, 7],          [9, 4]),    # A Bb C# D E F G — flamenco
-}
-
-
-# Chord library for progressions — A-rooted spellings of the common chords.
-# label -> (pcs, root_pc). Triads only; the Markov picker supplies the color.
-CHORDS = {
-    "A":   ([9, 1, 4], 9),    "Am":  ([9, 0, 4], 9),
-    "B":   ([11, 3, 6], 11),  "Bm":  ([11, 2, 6], 11),
-    "C":   ([0, 4, 7], 0),    "C#m": ([1, 4, 8], 1),
-    "D":   ([2, 6, 9], 2),    "Dm":  ([2, 5, 9], 2),
-    "E":   ([4, 8, 11], 4),   "Em":  ([4, 7, 11], 4),
-    "F":   ([5, 9, 0], 5),    "F#m": ([6, 9, 1], 6),
-    "G":   ([7, 11, 2], 7),
-}
-# Shipped progressions (all in A so they sit on the rendered samples; the live
-# root_offset transposes the whole cycle if the mic-jam has re-keyed the room).
-PROGRESSIONS = {
-    "pop":        ["A", "E", "F#m", "D"],                       # I–V–vi–IV
-    "doo_wop":    ["A", "F#m", "D", "E"],                       # I–vi–IV–V
-    "andalusian": ["Am", "G", "F", "E"],                        # i–♭VII–♭VI–V
-    "canon":      ["A", "E", "F#m", "C#m", "D", "A", "D", "E"], # Pachelbel
-    "lofi":       ["Bm", "E", "A", "F#m"],                      # ii–V–I–vi
-}
-
-def chord_step(prog, now=None):
-    """Which step of the progression is live right now. Stateless: the chord
-    clock is pure wall-time math, so every hook process (and the browser)
-    agrees on the current chord with no daemon and nothing to drift."""
-    steps = prog.get("steps") or []
-    if not steps: return None, None
-    step_s = max(2.0, float(prog.get("step_s", 8) or 8))
-    i = int((now if now is not None else time.time()) // step_s) % len(steps)
-    return i, steps[i]
+SCALES = music.SCALES
+CHORDS = music.CHORDS
+PROGRESSIONS = music.PROGRESSIONS
+chord_step = music.chord_step
 
 def resolve_chord():
     """Returns (pcs, roots, label) for the chord that's live right now, or
@@ -375,11 +334,7 @@ def resolve_scale(session_id):
     return None, None, None
 
 
-def expand_pcs_to_midis(pcs, low=57, high=88):
-    """Expand pitch classes to MIDI integers across a range. Used when applying
-    a scale override to tonal-overlay voices that need scale_pitches as midis."""
-    return [m for m in range(low, high + 1) if m % 12 in pcs]
-
+expand_pcs_to_midis = music.expand_pcs_to_midis
 
 _INTERVAL_WEIGHTS = {
     0: 0.00,   # exact repeat — never
@@ -753,7 +708,7 @@ def mapping_event_name(event_name):
     carry an ``on_failure`` override under PostToolUse, so preserve the preset
     format while accepting the current hook surface.
     """
-    return "PostToolUse" if event_name == "PostToolUseFailure" else event_name
+    return music.mapping_event_name(event_name)
 
 def resolve_voice(preset, event_name, payload):
     events = preset.get("events", {})

@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "name": "cathedral",
   "description": "Modal drone bed with full event palette. Lush, always-on, Eno/Budd lane.",
   "drone": "drone.wav",
