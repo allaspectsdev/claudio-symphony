@@ -17,6 +17,11 @@ Setup
   status                           Show install + drone + preset state, hooks, sessions, songs, quant
   doctor [--fix]                   Preflight check (python/numpy/player/samples/hooks); --fix renders if needed
   migrate                          Copy legacy checkout data into platform user directories
+  cache status                     Show generated-audio cache size and configured limit
+  cache limit <MB|off>             Set the soft cache cap and trim old rendered presets
+  cache trim                       Trim pitch data and oldest presets to the configured cap
+  cache clear <rate|samples|all>   Clear disposable cache data (preset settings are kept)
+  cache clear preset <name>        Clear generated samples for one built-in preset
   start                            Start the drone daemon for the active preset (no-op if no drone)
   stop                             Stop the drone process and kill afplay
   drone [on|off|status]            Drone bed — always follows the live root note (~½s retune)
@@ -139,6 +144,7 @@ import audio  # noqa: E402  (cross-platform playback + process helpers)
 import midiplay as midiplay_mod  # noqa: E402
 import timeline as timeline_mod  # noqa: E402
 import stateio  # noqa: E402
+import cache_manager  # noqa: E402
 import config_store  # noqa: E402
 import music  # noqa: E402
 import paths  # noqa: E402
@@ -156,6 +162,7 @@ RULES_FILE = paths.RULES_FILE
 EVENT_PATH = str(HERE / "event.py")
 DRONE_PATH = str(HERE / "drone.py")
 TUNE_PATH = str(HERE / "tune.py")
+RENDER_WORKER_PATH = str(HERE / "render_worker.py")
 PID_FILE = STATE / "drone.pid"
 
 MARKER = "__claudio_symphony__"
@@ -434,6 +441,59 @@ def cmd_setup(args):
         print(f"Install dependencies explicitly with:\n  {sys.executable} -m pip install -r {HERE / 'requirements.txt'}")
     return result.returncode
 
+def _size_label(value):
+    value = max(0, int(value or 0))
+    units = ("B", "KB", "MB", "GB", "TB")
+    amount = float(value)
+    unit = units[0]
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            break
+        amount /= 1024
+    return f"{amount:.0f} {unit}" if amount >= 100 else f"{amount:.1f} {unit}"
+
+def _print_cache_status(status):
+    limit = f"{status['limit_mb']} MB" if status["limit_mb"] else "unlimited"
+    flag = " (over limit)" if status.get("over_limit") else ""
+    print(f"cache:       {_size_label(status['total_bytes'])} / {limit}{flag}")
+    print(f"  samples:   {_size_label(status['sample_bytes'])} across {len(status['samples'])} presets")
+    print(f"  pitch:     {_size_label(status['rate_bytes'])}")
+    print(f"  location:  {status['cache_dir']}")
+    for item in sorted(status["samples"], key=lambda row: row["bytes"], reverse=True)[:10]:
+        print(f"    {item['name']:<18} {_size_label(item['bytes']):>10}")
+
+def cmd_cache(args):
+    sub = args[0] if args else "status"
+    if sub in ("status", "show", "list"):
+        _print_cache_status(cache_manager.status(CONFIG)); return
+    if sub == "limit":
+        if len(args) < 2:
+            print("usage: claudio cache limit <MB|off>"); return 1
+        raw = 0 if args[1].lower() in ("off", "none", "unlimited", "0") else args[1]
+        try:
+            result = cache_manager.set_limit(raw, CONFIG, preserve=(active_preset_name(),))
+        except ValueError as error:
+            print(error); return 1
+        print(f"cache limit → {result['limit_mb'] or 'unlimited'}{' MB' if result['limit_mb'] else ''}")
+        print(f"freed {_size_label(result['freed_bytes'])}")
+        return
+    if sub == "trim":
+        result = cache_manager.trim(config_path=CONFIG, preserve=(active_preset_name(),))
+        print(f"freed {_size_label(result['freed_bytes'])}")
+        _print_cache_status(result); return
+    if sub == "clear":
+        if len(args) < 2:
+            print("usage: claudio cache clear <rate|samples|all|preset NAME>"); return 1
+        scope = args[1]
+        preset = args[2] if scope == "preset" and len(args) > 2 else None
+        try:
+            result = cache_manager.clear(scope, preset=preset, config_path=CONFIG)
+        except ValueError as error:
+            print(error); return 1
+        print(f"freed {_size_label(result['freed_bytes'])}")
+        return
+    print(f"unknown cache subcommand: {sub}"); return 1
+
 def subprocess_run_render(render_path, preset_name=None):
     import subprocess
     try:
@@ -443,6 +503,11 @@ def subprocess_run_render(render_path, preset_name=None):
                            env=env, capture_output=True, text=True, timeout=600)
         if r.returncode != 0:
             print(r.stdout[-500:]); print(r.stderr[-500:], file=sys.stderr)
+        if r.returncode == 0:
+            cache_manager.trim(
+                config_path=CONFIG,
+                preserve=(preset_name or Path(render_path).parent.name,),
+            )
         return r.returncode == 0
     except Exception as e:
         print(f"  {e}", file=sys.stderr); return False
@@ -863,7 +928,7 @@ def _regen_voice(pname, vname):
     if render is None or not render.exists():
         print(f"  (preset '{pname}' has no render.py; reverb change saved but "
               f"samples not regenerated)"); return
-    audio.spawn_python(render, [vname], env=preset_store.renderer_env(pname))
+    audio.spawn_python(RENDER_WORKER_PATH, [pname, vname])
 
 
 def cmd_voice(args):
@@ -1021,7 +1086,7 @@ def cmd_regen(args):
     render = preset_store.render_path(name)
     legacy = HERE / "synth.py"
     if render is not None and render.exists():
-        audio.spawn_python(render, env=preset_store.renderer_env(name))
+        audio.spawn_python(RENDER_WORKER_PATH, [name])
     elif name == "cathedral" and legacy.exists():
         # legacy synth writes into samples/ at top level; need to redirect
         # to presets/cathedral/samples — but this is rarely needed since
@@ -1881,6 +1946,7 @@ def main(argv):
     elif cmd == "drone":                cmd_drone(args)
     elif cmd in ("doctor", "check"):    sys.exit(cmd_doctor(args))
     elif cmd == "migrate":              cmd_migrate(args)
+    elif cmd == "cache":                sys.exit(cmd_cache(args) or 0)
     elif cmd == "status":               cmd_status()
     elif cmd == "test":                 cmd_test(args[0] if args else None)
     elif cmd == "volume" and args:      cmd_volume(args[0])
@@ -1919,5 +1985,9 @@ def main(argv):
     else:
         print(__doc__)
 
+def entrypoint():
+    """Installed console-script entry point used by pipx and uv tool."""
+    return main(sys.argv[1:])
+
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    entrypoint()

@@ -33,6 +33,7 @@ LOGS = paths.LOG_DIR
 CONFIG = paths.CONFIG_FILE
 SESSIONS_FILE = paths.SESSIONS_FILE
 RULES_FILE = paths.RULES_FILE
+RENDER_WORKER = HERE / "render_worker.py"
 LOG = LOGS / "event.log"
 TIMELINE = timeline_mod.TIMELINE                      # shared with timeline.py so writer/reader can't drift
 TIMELINE_MAX_EVENTS = 20000                          # cap a marathon session's file growth
@@ -146,8 +147,7 @@ def ensure_rendered(name):
                 if render is None:
                     return False
                 spawn_mark.write_text(str(time.time()))
-                audio.spawn_python(str(render), cwd=str(HERE), detached=True,
-                                   env=preset_store.renderer_env(name))
+                audio.spawn_python(RENDER_WORKER, [name], cwd=str(HERE), detached=True)
     except Exception as e:
         log(f"render spawn failed for {name}: {e}")
     return False

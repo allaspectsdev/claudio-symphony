@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claudio-symphony"
+version = "1.2.0"
+description = "Ambient music that moves with your Claude Code session"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "allaspectsdev" }]
+keywords = ["claude-code", "audio", "ambient", "music", "sonification", "hooks"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Sound/Audio",
+]
+dependencies = [
+  "numpy>=1.24",
+  "windows-curses>=2.3; platform_system == 'Windows'",
+]
+
+[project.urls]
+Homepage = "https://github.com/allaspectsdev/claudio-symphony"
+Repository = "https://github.com/allaspectsdev/claudio-symphony"
+Issues = "https://github.com/allaspectsdev/claudio-symphony/issues"
+
+[project.scripts]
+claudio = "claudio_symphony.cli:entrypoint"
+
+[project.optional-dependencies]
+dev = ["ruff>=0.9"]
+
+[tool.setuptools]
+packages = ["claudio_symphony"]
+package-dir = { claudio_symphony = "." }
+include-package-data = true
+
+[tool.setuptools.package-data]
+claudio_symphony = [
+  "requirements.txt",
+  "donate.json",
+  ".claude-plugin/*.json",
+  "bin/*.py",
+  "hooks/*.json",
+  "presets/*/*.json",
+  "presets/*/*.py",
+  "skills/*/*.md",
+  "web/*.html",
+  "web/*.css",
+  "web/*.js",
+  "web/qr/*.svg",
+]

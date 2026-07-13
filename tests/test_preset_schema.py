@@ -99,6 +99,22 @@ class PresetPortabilityTests(unittest.TestCase):
         self.assertEqual(preset_store.load(imported)["description"], "portable original")
         self.assertEqual(preset_schema.validate(preset_store.load(imported)), [])
 
+    def test_restore_specific_snapshot_and_reject_future_import_schema(self):
+        original = dict(preset_store.load("meadow"))
+        original["description"] = "first version"
+        preset_store.save("test_portable", original)
+        changed = dict(original)
+        changed["description"] = "second version"
+        preset_store.save("test_portable", changed)
+        entry_id = preset_store.history("test_portable")[0]["id"]
+        self.assertTrue(preset_store.restore("test_portable", entry_id))
+        self.assertEqual(preset_store.load("test_portable")["description"], "first version")
+
+        future = dict(original)
+        future["schema_version"] = 999
+        with self.assertRaises(preset_schema.PresetValidationError):
+            preset_store.import_data(future, "test_imported")
+
 
 if __name__ == "__main__":
     unittest.main()

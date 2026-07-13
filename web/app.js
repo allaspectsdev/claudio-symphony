@@ -197,6 +197,7 @@ function renderStage() {
   $('#voiceHint').textContent = `the ${DETAIL.voices.length} instruments in this room — drag to shape each`;
   $('#musicScaleHint').textContent = isGlobal ? 'global default key' : 'global default (override per-session at right)';
   renderVoices(); renderEvents(); renderMusic(); renderActions(); renderSettings(); renderRules();
+  renderCache();
 }
 
 function renderSessionStrip() {
@@ -500,11 +501,12 @@ function renderRecList(s) {
 const HELP_ICONS = ['🎛️', '🧭', '🎵', '🎬', '🎹', '🎙️', '🎧'];
 const WEB_HELP = [
   { heading: 'Presets & sound', items: [
-    'Browse 36+ presets, audition any, and set one as the global default.',
+    'Browse 40 presets, audition any, and set one as the global default.',
     'Constellation view: each orbiting orb is a voice — click it to hear it and jump to its controls.',
     'Sounds tab: what plays when (events up top), then every voice\'s gain, reverb, rate and echo below — ✎ on any event jumps to its voice.',
     "Swap any voice's samples for a sound from any other preset.",
-    'Build your own preset from sounds across all presets (Browse → Build).'] },
+    'Build your own preset from sounds across all presets (Browse → Build).',
+    'Setup → Preset actions: import/export portable JSON, browse edit history, restore a snapshot, or undo the latest edit.'] },
   { heading: 'Routing — who plays where', items: [
     'Left rail lists live Claude sessions; click one to focus and edit it.',
     'Pin a preset, scale, or MIDI song to just one session; Unpin to release.',
@@ -531,7 +533,7 @@ const WEB_HELP = [
     'Adjust tempo (0.5×–2×) and loop; rows pulse as they fire. Tip: start Rec first to capture the whole performance.'] },
   { heading: 'Record & tune', items: [
     'Rec: capture a 15s–5m clip (optional drone bed); clips download as .m4a + .wav.',
-    'Setup tab: master/drone gain, preset actions (test, regenerate, reset), directory rules.',
+    'Setup tab: master/drone gain, preset actions, generated-audio cache size/limit/cleanup, and directory rules.',
     'Top bar: master volume slider and a global power toggle (mute/unmute).',
     '⋯ menu → Options: pick your accent color, headphone mode, mic monitor, visual energy.',
     'Display modes: hover the constellation for the ✦ ◍ ≈ switcher — orbs, still pond, or flowing tides.'] },
@@ -1214,11 +1216,105 @@ function renderActions() {
     { lab: 'Audition', small: 'play a taste of this preset', btn: '▶ play', cls: '', fn: () => { api.post('/api/audition', { name: P }); toast(`auditioning <span class="g">${esc(P)}</span>`); } },
     { lab: 'Test events', small: 'fire one of each hook event', btn: 'run test', cls: 'ghost', fn: () => { api.post('/api/test', { name: P }); toast('walking through events…'); } },
     { lab: 'Regenerate samples', small: 'rebuild all WAVs from render.py', btn: 'regenerate', cls: 'ghost', fn: () => { api.post('/api/regen', { name: P }); toast(`re-rendering <span class="g">${esc(P)}</span>…`); } },
+    { lab: 'Export preset', small: 'download portable, validated JSON', btn: 'export', cls: 'ghost', fn: () => exportPreset(P) },
+    { lab: 'Import preset', small: 'add or update a preset from JSON', btn: 'import', cls: 'ghost', fn: () => $('#presetImport').click() },
+    { lab: 'Edit history', small: 'browse snapshots or undo an edit', btn: 'history', cls: 'ghost', fn: () => openHistory(P) },
     { lab: 'Reset preset', small: 'restore preset.json from shipped default', btn: 'reset', cls: 'danger', fn: async () => { const r = await api.post('/api/preset/reset', { name: P }); toast(r.ok ? 'reset to default' : esc(r.msg || 'no default')); if (r.ok) loadFocus(); } },
   ];
   acts.forEach(a => { const el = document.createElement('div'); el.className = 'actrow';
     el.innerHTML = `<div class="alab">${a.lab}<small>${a.small}</small></div><button class="btn ${a.cls}">${a.btn}</button>`;
     el.querySelector('button').onclick = a.fn; w.appendChild(el); });
+}
+
+async function exportPreset(name) {
+  const r = await api.get('/api/preset/export?name=' + encodeURIComponent(name));
+  if (!r || !r.preset) { toast(esc((r && r.error) || 'export failed')); return; }
+  const blob = new Blob([JSON.stringify(r.preset, null, 2) + '\n'], { type: 'application/json' });
+  const url = URL.createObjectURL(blob), a = document.createElement('a');
+  a.href = url; a.download = r.filename || `${name}.claudio-preset.json`;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 500);
+  toast(`exported <span class="g">${esc(name)}</span>`);
+}
+
+async function importPresetFile(file) {
+  if (!file) return;
+  let preset;
+  try { preset = JSON.parse(await file.text()); }
+  catch (_) { toast('that file is not valid JSON'); return; }
+  if (!preset || typeof preset !== 'object' || Array.isArray(preset)) { toast('preset file must contain one JSON object'); return; }
+  let name = String(preset.name || file.name.replace(/(?:\.claudio-preset)?\.json$/i, '')).toLowerCase()
+    .replace(/[^a-z0-9_-]/g, '').slice(0, 64);
+  if (!name) { toast('the preset needs a lowercase name'); return; }
+  if ((STATE.presets || []).some(p => p.name === name) && !confirm(`Import over “${name}”? Your current version will remain in edit history.`)) return;
+  const r = await api.post('/api/preset/import', { name, preset });
+  if (!r || !r.ok) { toast(esc((r && (r.error || r.msg)) || 'import failed')); return; }
+  const s = await api.get('/api/state'); STATE.presets = s.presets;
+  if (editPreset() === r.name) await loadFocus();
+  toast(`imported <span class="g">${esc(r.name)}</span> · ready in Browse presets`);
+}
+
+let HISTORY_PRESET = null;
+async function openHistory(name) {
+  HISTORY_PRESET = name;
+  $('#historySub').textContent = `${name} · restore any snapshot without touching bundled files`;
+  $('#historyModal').hidden = false;
+  await renderHistory();
+}
+function closeHistory() { $('#historyModal').hidden = true; HISTORY_PRESET = null; }
+async function renderHistory() {
+  const body = $('#historyBody'); body.innerHTML = '<div class="history-empty">loading snapshots…</div>';
+  const r = await api.get('/api/preset/history?name=' + encodeURIComponent(HISTORY_PRESET));
+  const entries = (r && r.history) || [];
+  $('#historyUndo').disabled = !entries.length;
+  if (!entries.length) { body.innerHTML = '<div class="history-empty">No snapshots yet. Your first preset edit will create one automatically.</div>'; return; }
+  body.innerHTML = '';
+  entries.forEach((entry, index) => {
+    const row = document.createElement('div'); row.className = 'history-row';
+    const when = new Date(entry.timestamp * 1000);
+    row.innerHTML = `<div class="history-mark">${index + 1}</div><div class="history-meta"><b>${esc(entry.description || HISTORY_PRESET)}</b><span>${esc(when.toLocaleString())}</span></div><button class="btn ghost sm">Restore</button>`;
+    row.querySelector('button').onclick = async () => {
+      const out = await api.post('/api/preset/restore', { name: HISTORY_PRESET, id: entry.id });
+      if (!out.ok) { toast('snapshot could not be restored'); return; }
+      toast(`restored <span class="g">${esc(HISTORY_PRESET)}</span>`); await loadFocus(); await renderHistory();
+    };
+    body.appendChild(row);
+  });
+}
+
+function bytesLabel(value) {
+  value = Math.max(0, Number(value) || 0);
+  if (value < 1024) return `${value} B`;
+  const units = ['KB', 'MB', 'GB', 'TB']; let n = value / 1024, i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${n >= 100 ? n.toFixed(0) : n >= 10 ? n.toFixed(1) : n.toFixed(2)} ${units[i]}`;
+}
+async function renderCache() {
+  const wrap = $('#cacheManager'); if (!wrap) return;
+  let c; try { c = await api.get('/api/cache'); } catch (_) { wrap.innerHTML = '<div class="rempty">cache status unavailable</div>'; return; }
+  const pct = c.limit_bytes ? Math.min(100, c.total_bytes / c.limit_bytes * 100) : 0;
+  const current = (c.samples || []).find(p => p.name === editPreset());
+  wrap.innerHTML = `<div class="cache-summary"><div><b>${bytesLabel(c.total_bytes)}</b><span>${c.limit_mb ? ` of ${c.limit_mb} MB` : ' · unlimited'}</span></div><span>${(c.samples || []).length} rendered presets</span></div>
+    <div class="cache-meter ${c.over_limit ? 'over' : ''}"><i style="width:${pct.toFixed(1)}%"></i></div>
+    <div class="cache-breakdown"><span>sounds <b>${bytesLabel(c.sample_bytes)}</b></span><span>pitch cache <b>${bytesLabel(c.rate_bytes)}</b></span><span>${esc(editPreset())} <b>${bytesLabel(current ? current.bytes : 0)}</b></span></div>
+    <div class="cache-limit"><label>Soft limit <small>oldest generated presets are removed after rendering</small></label><div><input class="numbox" id="cacheLimit" type="number" min="0" max="16384" step="64" value="${c.limit_mb}"><span>MB</span><button class="btn sm" id="cacheLimitSave">Save</button></div></div>
+    <div class="cache-actions"><button class="btn ghost sm" id="cacheTrim">Trim now</button><button class="btn ghost sm" id="cacheRateClear">Clear pitch cache</button><button class="btn ghost sm" id="cachePresetClear" ${current ? '' : 'disabled'}>Clear ${esc(editPreset())} sounds</button><button class="btn danger sm" id="cacheAllClear">Clear all sounds</button></div>
+    <div class="cache-path" title="${esc(c.cache_dir)}">${esc(c.cache_dir)}</div>`;
+  $('#cacheLimitSave').onclick = async () => {
+    const mb = +$('#cacheLimit').value;
+    const r = await api.post('/api/cache/limit', { mb });
+    toast(r.ok ? `cache limit → <span class="g">${mb ? mb + ' MB' : 'unlimited'}</span>` : esc(r.error || 'invalid limit'));
+    await renderCache();
+  };
+  $('#cacheTrim').onclick = async () => { const r = await api.post('/api/cache/trim', {}); toast(`freed <span class="g">${bytesLabel(r.freed_bytes)}</span>`); await renderCache(); };
+  $('#cacheRateClear').onclick = async () => { const r = await api.post('/api/cache/clear', { scope: 'rate' }); toast(`cleared <span class="g">${bytesLabel(r.freed_bytes)}</span> of pitch cache`); await renderCache(); };
+  $('#cachePresetClear').onclick = async () => {
+    const name = editPreset(); if (!confirm(`Clear generated sounds for “${name}”? They will render again when needed.`)) return;
+    const r = await api.post('/api/cache/clear', { scope: 'preset', preset: name }); toast(`cleared <span class="g">${bytesLabel(r.freed_bytes)}</span>`); await renderCache();
+  };
+  $('#cacheAllClear').onclick = async () => {
+    if (!confirm('Clear every generated sound? Preset settings and custom presets are kept, but sounds must render again.')) return;
+    const r = await api.post('/api/cache/clear', { scope: 'samples' }); toast(`cleared <span class="g">${bytesLabel(r.freed_bytes)}</span>`); await renderCache();
+  };
 }
 
 /* ---------------- rules ---------------- */
@@ -1282,6 +1378,16 @@ function wireGlobal() {
   $('#optsBtn').onclick = openOpts;
   $('#optsClose').onclick = closeOpts;
   $('#optsModal').onclick = (e) => { if (e.target.id === 'optsModal') closeOpts(); };
+  $('#presetImport').onchange = e => { importPresetFile(e.target.files[0]); e.target.value = ''; };
+  $('#historyClose').onclick = closeHistory;
+  $('#historyModal').onclick = e => { if (e.target.id === 'historyModal') closeHistory(); };
+  $('#historyUndo').onclick = async () => {
+    if (!HISTORY_PRESET) return;
+    const r = await api.post('/api/preset/undo', { name: HISTORY_PRESET });
+    if (!r.ok) { toast('nothing to undo'); return; }
+    toast(`undid the latest <span class="g">${esc(HISTORY_PRESET)}</span> edit`);
+    await loadFocus(); await renderHistory();
+  };
   // first-run welcome — show once, reopenable from the ⋯ menu
   $('#welBtn').onclick = openWelcome;
   $('#welGo').onclick = closeWelcome;
@@ -1327,6 +1433,7 @@ function wireGlobal() {
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
     if (!$('#ofMenu').hidden) $('#ofMenu').hidden = true;
+    else if (!$('#historyModal').hidden) closeHistory();
     else if (!$('#welcome').hidden) closeWelcome();
     else if (!$('#optsModal').hidden) closeOpts();
     else if (!$('#swap').hidden) closeSwap();

@@ -1,0 +1,7 @@
+include LICENSE README.md requirements.txt donate.json
+recursive-include .claude-plugin *.json
+recursive-include bin *.py
+recursive-include hooks *.json
+recursive-include presets *.json *.py
+recursive-include skills *.md
+recursive-include web *.html *.css *.js *.svg

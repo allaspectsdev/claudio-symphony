@@ -124,6 +124,7 @@
                 <div>
                   <div class="panel"><h3>Levels</h3><div id="settings"></div></div>
                   <div class="panel"><h3>Preset actions</h3><div id="presetActions"></div></div>
+                  <div class="panel"><h3>Generated audio cache <span class="hint">size · limit · cleanup</span></h3><div id="cacheManager"></div></div>
                 </div>
                 <div class="panel">
                   <h3>Directory rules <span class="hint">first match wins · cwd glob → preset</span></h3>
@@ -182,6 +183,26 @@
         </div>
       </div>
     </section>
+  </div>
+
+  <input type="file" id="presetImport" accept=".json,application/json" hidden>
+
+  <!-- preset edit history / portability -->
+  <div class="historymodal" id="historyModal" hidden>
+    <div class="history-panel">
+      <header class="history-head">
+        <div>
+          <div class="history-title">Preset history</div>
+          <div class="history-sub" id="historySub">Automatic snapshots of your recent edits.</div>
+        </div>
+        <button class="history-close" id="historyClose" aria-label="Close preset history">✕</button>
+      </header>
+      <div class="history-body" id="historyBody"></div>
+      <footer class="history-foot">
+        <span>Up to 25 snapshots · rapid slider changes are grouped</span>
+        <button class="btn ghost" id="historyUndo">Undo latest edit</button>
+      </footer>
+    </div>
   </div>
 
   <!-- preset browser overlay -->
@@ -266,7 +287,7 @@
       <p class="wel-lead">It turns your Claude Code session into calm, generative music. Every tool call, file edit, and finished reply becomes a soft, in-key sound — so you can <em>hear</em> what your agent is doing without staring at it.</p>
       <div class="wel-cards">
         <div class="wel-card"><div class="wel-ico">🌌</div><div class="wel-h">Watch it play</div><div class="wel-b">Each glowing orb is an instrument — a <b>voice</b> — that blooms when Claude triggers it. Big moments (a finished turn) break across the screen as light. Click any orb to hear it; try the <b>views</b> ✦◍≈❋✸ top-right.</div></div>
-        <div class="wel-card"><div class="wel-ico">🎚️</div><div class="wel-h">Make it yours</div><div class="wel-b">The <b>Sounds</b> tab shows what plays when. Swap sounds, switch between 37 rooms, or build your own. Changes are live — nothing to save.</div></div>
+        <div class="wel-card"><div class="wel-ico">🎚️</div><div class="wel-h">Make it yours</div><div class="wel-b">The <b>Sounds</b> tab shows what plays when. Swap sounds, switch between 40 rooms, or build your own. Changes are live — nothing to save.</div></div>
         <div class="wel-card"><div class="wel-ico">🎤</div><div class="wel-h">Jam with it</div><div class="wel-b">Hit <b>Listen</b> and it tunes to whatever you hum. Add a drone, a chord progression, headphones — and play along.</div></div>
       </div>
       <div class="wel-foot">

@@ -1,7 +1,7 @@
 {
   "name": "claudio-symphony",
   "description": "Ambient music that moves with your Claude Code session — every tool call, edit, and finished turn becomes a soft, in-key sound. 40 presets, a live web console, mic-jam, and more.",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": { "name": "allaspectsdev" },
   "homepage": "https://github.com/allaspectsdev/claudio-symphony",
   "repository": { "type": "git", "url": "https://github.com/allaspectsdev/claudio-symphony" },

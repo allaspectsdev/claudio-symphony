@@ -22,6 +22,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import paths
 import preset_store
+import cache_manager
 import config_store
 
 PRESETS = paths.BUILTIN_PRESETS_DIR
@@ -89,6 +90,7 @@ for p in preset_dirs:
         fatal(f"render failed for preset '{p.name}'")
     n_wavs = sum(1 for _ in preset_store.sample_output_dir(p.name).rglob("*.wav"))
     print(f"    {n_wavs} samples")
+cache_manager.trim(config_path=CONFIG, preserve=(DEFAULT_CONFIG["preset"],))
 
 step("Writing starter config (only if config.json doesn't exist)")
 if CONFIG.exists():

@@ -160,6 +160,23 @@ Prefer buttons? Hit **● Rec** in `claudio web` — pick a length, optionally f
 
 ## 📦 Install
 
+### Recommended: isolated CLI with `uv` or `pipx`
+
+Install directly from GitHub into a dedicated environment. This installs numpy intentionally, keeps Claudio out of your system Python, and provides the `claudio` command globally:
+
+```bash
+# Fast path with uv
+uv tool install git+https://github.com/allaspectsdev/claudio-symphony.git
+
+# Or with pipx
+pipx install git+https://github.com/allaspectsdev/claudio-symphony.git
+
+claudio setup             # migrate legacy data + render sounds
+claudio install           # add hooks to ~/.claude/settings.json
+```
+
+Use one hook installation path: either this CLI flow or the Claude Code plugin below, not both. Upgrade later with `uv tool upgrade claudio-symphony` or `pipx upgrade claudio-symphony`. Claudio supports Python 3.9+, but current pipx itself requires Python 3.10+; use `uv` on a Python-3.9-only machine.
+
 ### Easiest: as a Claude Code plugin (two lines)
 
 Paste these into Claude Code:
@@ -206,7 +223,7 @@ Song-mode pitch micro-tuning is native on afplay/ffplay/mpv/sox; on volume-only 
 
 All mutable data lives outside the checkout in the platform-standard config, data, state, cache, and log directories. Set `CLAUDIO_HOME=/path` for a portable installation, or run `claudio migrate` to copy data from an older checkout-local installation without deleting the originals.
 
-Tip: add `alias claudio='~/path/to/claudio-symphony/bin/claudio'` to your shell profile (macOS/Linux). On Windows, run via `bin\claudio.cmd`.
+For a manual clone, add `alias claudio='~/path/to/claudio-symphony/bin/claudio'` to your shell profile (macOS/Linux). On Windows, run via `bin\claudio.cmd`. The `uv`/`pipx` installation needs no alias.
 
 ---
 
@@ -220,6 +237,9 @@ claudio preset diff cathedral           # inspect edits from the shipped baselin
 claudio preset undo cathedral           # undo the most recent preset edit
 claudio preset export cathedral room.json
 claudio preset import room.json my-room
+claudio cache status                     # generated sounds, pitch cache, and limit
+claudio cache limit 512                  # trim oldest generated rooms above 512 MB
+claudio cache clear preset cathedral     # settings stay; sounds render again on demand
 claudio off / claudio on                # silence everything / restore
 claudio web                             # the browser control panel
 claudio tune                            # interactive terminal tuner (TUI)
@@ -271,6 +291,8 @@ claudio song use mario                    # drive a voice from a MIDI melody
 
 - **Swap a single sound** — in the Sounds tab, the **↺** button on any voice lets you replace just that one sound with any voice from any preset, keeping its level, echo, and event mappings.
 - **Manage your presets** — custom presets you build get **rename** (✎) and **delete** (🗑) right on their gallery card; the 40 shipped presets are protected and can't be deleted.
+- **Move and recover your presets** — Setup → Preset actions can import/export portable JSON, browse automatic edit history, restore any snapshot, or undo the latest change.
+- **Control disk use** — Setup → Generated audio cache shows what sounds consume, sets a soft cap, trims the oldest rendered rooms, and clears pitch/current/all generated audio without touching preset settings or custom-preset data.
 
 **The hands-on way — author it in code.** Each preset is three things:
 

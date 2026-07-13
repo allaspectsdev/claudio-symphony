@@ -45,6 +45,7 @@ STATE = paths.STATE_DIR
 CONFIG = paths.CONFIG_FILE
 SESSIONS_FILE = paths.SESSIONS_FILE
 EVENT_PY = HERE / "event.py"
+RENDER_WORKER = HERE / "render_worker.py"
 
 def load_json(p, default):
     return stateio.load_json(p, default)
@@ -590,8 +591,7 @@ class TuneUI:
             self.status("no render.py for this preset"); return
         self.status(f"regenerating {self.preset_name} samples (background)...", dur=8.0)
         try:
-            audio.spawn_python(rp, detached=True,
-                               env=preset_store.renderer_env(self.preset_name))
+            audio.spawn_python(RENDER_WORKER, [self.preset_name], detached=True)
         except Exception as e:
             self.status(f"regen failed: {e}")
             return

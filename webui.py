@@ -18,6 +18,7 @@ from http.cookies import SimpleCookie
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import audio  # noqa: E402  (cross-platform playback + process helpers)
+import cache_manager  # noqa: E402
 import config_store  # noqa: E402
 import music  # noqa: E402
 import paths  # noqa: E402
@@ -31,6 +32,7 @@ SESSIONS_FILE = paths.SESSIONS_FILE
 EVENT_PY = str(HERE / "event.py")
 RECORD_PY = str(HERE / "record.py")
 MIDIPLAY_PY = str(HERE / "midiplay.py")
+RENDER_WORKER_PY = str(HERE / "render_worker.py")
 REC_DIR = STATE / "recording"
 REC_ACTIVE = REC_DIR / "active.json"
 REC_EVENTS = REC_DIR / "events.jsonl"
@@ -169,7 +171,7 @@ def regen_voice(preset, voice):
     if render is None or not render.exists(): return False, "no render.py for this preset"
     def _run():
         try:
-            audio.spawn_python(render, [voice], cwd=str(HERE), env=preset_store.renderer_env(preset))
+            audio.spawn_python(RENDER_WORKER_PY, [preset, voice], cwd=str(HERE))
         except Exception:
             pass
     threading.Thread(target=_run, daemon=True).start()
@@ -693,6 +695,16 @@ class Handler(BaseHTTPRequestHandler):
             entries = [{k: v for k, v in entry.items() if k != "path"}
                        for entry in preset_store.history(name)]
             return self._send(200, {"name": name, "history": entries})
+        if path == "/api/preset/export":
+            name = (q.get("name") or [active_preset_name()])[0]
+            preset = load_preset(name)
+            if preset is None:
+                return self._send(404, {"error": "not found"})
+            return self._send(200, {
+                "name": name, "filename": f"{name}.claudio-preset.json", "preset": preset
+            })
+        if path == "/api/cache":
+            return self._send(200, cache_manager.status(CONFIG))
         if path == "/api/activity":
             name = (q.get("name") or [active_preset_name()])[0]
             data = activity(name)
@@ -903,7 +915,7 @@ class Handler(BaseHTTPRequestHandler):
                 render = preset_path(name, "render.py")
                 if render and render.exists():
                     threading.Thread(target=lambda: audio.spawn_python(
-                        render, cwd=str(HERE), env=preset_store.renderer_env(name)),
+                        RENDER_WORKER_PY, [name], cwd=str(HERE)),
                                      daemon=True).start()
                 return self._send(200, {"ok": bool(render and render.exists())})
             if path == "/api/preset/reset":
@@ -911,6 +923,38 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/preset/undo":
                 name = b.get("name", active_preset_name())
                 return self._send(200, {"ok": preset_store.undo(name), "name": name})
+            if path == "/api/preset/restore":
+                name = b.get("name", active_preset_name())
+                return self._send(200, {
+                    "ok": preset_store.restore(name, str(b.get("id", ""))), "name": name
+                })
+            if path == "/api/preset/import":
+                try:
+                    name = preset_store.import_data(b.get("preset"), b.get("name"))
+                except (TypeError, ValueError) as error:
+                    return self._send(400, {"ok": False, "error": str(error)})
+                return self._send(200, {"ok": True, "name": name})
+            if path == "/api/cache/limit":
+                try:
+                    result = cache_manager.set_limit(
+                        b.get("mb"), CONFIG, preserve=(active_preset_name(),)
+                    )
+                except ValueError as error:
+                    return self._send(400, {"ok": False, "error": str(error)})
+                return self._send(200, {"ok": True, **result})
+            if path == "/api/cache/trim":
+                return self._send(200, {
+                    "ok": True,
+                    **cache_manager.trim(config_path=CONFIG, preserve=(active_preset_name(),)),
+                })
+            if path == "/api/cache/clear":
+                try:
+                    result = cache_manager.clear(
+                        str(b.get("scope", "")), preset=b.get("preset"), config_path=CONFIG
+                    )
+                except ValueError as error:
+                    return self._send(400, {"ok": False, "error": str(error)})
+                return self._send(200, {"ok": True, **result})
             if path == "/api/test":
                 fire_test(b.get("name"))
                 return self._send(200, {"ok": True})
@@ -1073,7 +1117,7 @@ class Handler(BaseHTTPRequestHandler):
         render = preset_path(preset, "render.py")
         if render and render.exists():
             threading.Thread(target=lambda: audio.spawn_python(
-                render, cwd=str(HERE), env=preset_store.renderer_env(preset)),
+                RENDER_WORKER_PY, [preset], cwd=str(HERE)),
                              daemon=True).start()
         return self._send(200, {"ok": True, "regen": bool(render and render.exists())})
 

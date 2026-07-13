@@ -273,6 +273,20 @@ def undo(name):
     return True
 
 
+def restore(name, entry_id):
+    if not valid_name(name) or not isinstance(entry_id, str) or not entry_id.isdigit():
+        return False
+    path = _history_dir(name) / f"{entry_id}.json"
+    if not path.is_file():
+        return False
+    restored = _normalized(name, stateio.load_json(path, {}))
+    current = load(name)
+    if current != restored:
+        _snapshot(name, current, coalesce=False)
+        _write(name, restored)
+    return True
+
+
 def export_to(name, destination):
     data = load(name)
     if data is None:
@@ -286,7 +300,19 @@ def export_to(name, destination):
 def import_from(source, name=None):
     source = Path(source).expanduser()
     data = json.loads(source.read_text())
-    target = name or data.get("name") or source.stem
+    return import_data(data, name or data.get("name") or source.stem)
+
+
+def import_data(data, name=None):
+    if not isinstance(data, dict):
+        raise ValueError("preset import must contain one JSON object")
+    incoming_version = data.get("schema_version")
+    if incoming_version not in (None, preset_schema.CURRENT_VERSION):
+        raise preset_schema.PresetValidationError([
+            f"schema_version: unsupported {incoming_version!r} "
+            f"(expected {preset_schema.CURRENT_VERSION})"
+        ])
+    target = name or data.get("name")
     if not valid_name(target):
         raise ValueError("import needs a valid lowercase preset name")
     save(target, data)

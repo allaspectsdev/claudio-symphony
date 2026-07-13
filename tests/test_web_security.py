@@ -1,5 +1,6 @@
 import http.client
 import json
+import shutil
 import tempfile
 import threading
 import unittest
@@ -7,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 import webui
+import preset_store
 
 HERE = Path(__file__).resolve().parent.parent
 
@@ -55,6 +57,12 @@ class WebHTTPTests(unittest.TestCase):
         status, headers, _ = self.request("GET", "/")
         self.assertEqual(status, 200)
         return headers["Set-Cookie"].split(";", 1)[0]
+
+    def json_headers(self, cookie):
+        return {
+            "Cookie": cookie, "Content-Type": "application/json",
+            "Origin": f"http://127.0.0.1:{self.port}",
+        }
 
     def test_root_sets_strict_cookie_and_security_headers(self):
         status, headers, _ = self.request("GET", "/")
@@ -118,6 +126,60 @@ class WebHTTPTests(unittest.TestCase):
             self.assertEqual(status, 200, body)
             self.assertTrue(json.loads(body)["muted"])
             self.assertTrue(json.loads(webui.CONFIG.read_text())["muted"])
+
+    def test_preset_import_export_and_history_are_authenticated(self):
+        cookie = self.auth_cookie()
+        name = "web-import-test"
+        try:
+            preset = dict(preset_store.load("meadow"))
+            preset["name"] = name
+            preset["description"] = "web import one"
+            body = json.dumps({"name": name, "preset": preset})
+            status, _, data = self.request(
+                "POST", "/api/preset/import", body, self.json_headers(cookie)
+            )
+            self.assertEqual(status, 200, data)
+            self.assertTrue(json.loads(data)["ok"])
+
+            preset["description"] = "web import two"
+            status, _, _ = self.request(
+                "POST", "/api/preset/import",
+                json.dumps({"name": name, "preset": preset}), self.json_headers(cookie),
+            )
+            self.assertEqual(status, 200)
+
+            status, _, data = self.request(
+                "GET", f"/api/preset/export?name={name}", headers={"Cookie": cookie}
+            )
+            exported = json.loads(data)
+            self.assertEqual(status, 200)
+            self.assertEqual(exported["preset"]["description"], "web import two")
+
+            status, _, data = self.request(
+                "GET", f"/api/preset/history?name={name}", headers={"Cookie": cookie}
+            )
+            self.assertEqual(status, 200)
+            self.assertGreaterEqual(len(json.loads(data)["history"]), 1)
+        finally:
+            shutil.rmtree(preset_store.user_dir(name), ignore_errors=True)
+            shutil.rmtree(preset_store._history_dir(name), ignore_errors=True)
+
+    def test_import_rejects_future_schema_and_cache_limit_is_bounded(self):
+        cookie = self.auth_cookie()
+        preset = dict(preset_store.load("meadow"))
+        preset["schema_version"] = 999
+        status, _, _ = self.request(
+            "POST", "/api/preset/import",
+            json.dumps({"name": "future-test", "preset": preset}), self.json_headers(cookie),
+        )
+        self.assertEqual(status, 400)
+        status, _, data = self.request("GET", "/api/cache", headers={"Cookie": cookie})
+        self.assertEqual(status, 200, data)
+        self.assertIn("total_bytes", json.loads(data))
+        status, _, _ = self.request(
+            "POST", "/api/cache/limit", '{"mb":1}', self.json_headers(cookie)
+        )
+        self.assertEqual(status, 400)
 
 
 if __name__ == "__main__":

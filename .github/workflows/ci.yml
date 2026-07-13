@@ -47,12 +47,19 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: python -m pip install -r requirements.txt ruff
+      - run: python -m pip install -r requirements.txt ruff "setuptools>=68" wheel
       - run: python -m compileall -q .
       - run: ruff check --select E9,F63,F7,F82 .
       - run: python cli.py preset validate --all
         env:
           CLAUDIO_HOME: ${{ runner.temp }}/claudio
+      - name: Build and import the isolated tool package
+        run: python -m pip install --no-deps --no-build-isolation --target "${{ runner.temp }}/package" .
+      - name: Verify packaged runtime assets
+        run: python -c "from pathlib import Path; import claudio_symphony, claudio_symphony.cli as c; root=Path(claudio_symphony.__file__).parent; assert c.entrypoint; assert (root/'web/app.js').is_file(); assert len(list((root/'presets').glob('*/preset.json'))) == 40"
+        env:
+          PYTHONPATH: ${{ runner.temp }}/package
+          CLAUDIO_HOME: ${{ runner.temp }}/package-home
       - run: node --check web/app.js
       - name: Render one complete preset outside the checkout
         run: python presets/meadow/render.py
