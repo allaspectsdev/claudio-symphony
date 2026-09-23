@@ -18,7 +18,7 @@ auto-detected by default) so polyphonic files don't smear into mush.
 
 Pure stdlib — small SMF parser inside, no external deps.
 """
-import json, struct, time
+import bisect, struct, time
 from pathlib import Path
 import stateio
 import config_store
@@ -42,19 +42,49 @@ def _save(p, d):
 
 # ---------- SMF parser (Type 0/1, ticks-per-quarter only) ----------
 
-def _read_varlen(data, i):
+def _read_varlen(data, i, end=None):
+    """Read a MIDI variable-length quantity at data[i]. Raises ValueError
+    (never IndexError) if the quantity runs past `end` / the buffer."""
+    end = len(data) if end is None else min(end, len(data))
     val = 0
-    while True:
+    for _ in range(4):                      # SMF varlens are at most 4 bytes
+        if i >= end:
+            raise ValueError("truncated MIDI")
         b = data[i]; i += 1
         val = (val << 7) | (b & 0x7F)
         if not (b & 0x80):
             return val, i
+    raise ValueError("malformed MIDI (variable-length quantity too long)")
+
+
+def _tempo_map_fn(tempos, ppq):
+    """Build tick → seconds from [(abs_tick, us_per_quarter), …] gathered across
+    all tracks (type-1 files keep them on the conductor track). 120 bpm applies
+    until the first tempo event; a later event at the same tick wins."""
+    tempos = sorted(tempos, key=lambda x: x[0])   # stable: file order kept per tick
+    segs = [(0, 0.0, 500_000)]                    # (start_tick, start_sec, us_per_q)
+    for tick, us in tempos:
+        st, ss, sus = segs[-1]
+        sec = ss + (tick - st) * sus / 1e6 / ppq
+        if tick == st:
+            segs[-1] = (st, ss, us)
+        else:
+            segs.append((tick, sec, us))
+    starts = [s[0] for s in segs]
+
+    def to_sec(tick):
+        st, ss, us = segs[bisect.bisect_right(starts, tick) - 1]
+        return ss + (tick - st) * us / 1e6 / ppq
+    return to_sec
 
 
 def parse_midi(path):
     """Parse a Standard MIDI File. Returns
-        {bpm, ppq, notes: [{midi, beat, velocity, channel}, ...]}
-    Drum channel (10 / index 9) is skipped. Notes sorted by beat then pitch.
+        {bpm, ppq, notes: [{midi, beat, sec, velocity, channel}, ...]}
+    `bpm` is the opening tempo; `sec` is each onset in seconds through the full
+    tempo map (tempo changes anywhere in any track). Drum channel (10 / index 9)
+    is skipped. Notes sorted by beat then pitch. Unknown chunks are skipped;
+    truncated data raises ValueError.
     """
     data = Path(path).read_bytes()
     if len(data) < 14 or data[:4] != b"MThd":
@@ -66,18 +96,23 @@ def parse_midi(path):
     ppq = division if division else 480
     i = 8 + hlen
     initial_tempo_us = None
+    tempos = []  # (abs_tick, us_per_quarter) from every track
     notes = []  # (abs_tick, midi, vel, channel)
 
-    for _ in range(ntracks):
-        if i + 8 > len(data) or data[i:i+4] != b"MTrk":
-            break
-        tlen = struct.unpack(">I", data[i+4:i+8])[0]
+    tracks_seen = 0
+    while tracks_seen < ntracks and i + 8 <= len(data):
+        clen = struct.unpack(">I", data[i+4:i+8])[0]
+        if data[i:i+4] != b"MTrk":          # alien chunk (e.g. XFIH): skip it
+            i += 8 + clen
+            continue
+        tracks_seen += 1
+        tlen = clen
         i += 8
         end = min(i + tlen, len(data))
         abs_tick = 0
         running = None
         while i < end:
-            delta, i = _read_varlen(data, i)
+            delta, i = _read_varlen(data, i, end)
             abs_tick += delta
             if i >= end:
                 break
@@ -94,14 +129,16 @@ def parse_midi(path):
             if status == 0xFF:  # meta
                 if i >= end: break
                 mtype = data[i]; i += 1
-                mlen, i = _read_varlen(data, i)
+                mlen, i = _read_varlen(data, i, end)
                 if mtype == 0x51 and mlen == 3 and i + 3 <= end:
                     tempo_us = (data[i] << 16) | (data[i+1] << 8) | data[i+2]
-                    if initial_tempo_us is None and abs_tick == 0:
+                    if tempo_us > 0:
+                        tempos.append((abs_tick, tempo_us))
+                    if initial_tempo_us is None and abs_tick == 0 and tempo_us > 0:
                         initial_tempo_us = tempo_us
                 i += mlen
             elif status in (0xF0, 0xF7):  # sysex
-                slen, i = _read_varlen(data, i)
+                slen, i = _read_varlen(data, i, end)
                 i += slen
             else:
                 hi = status & 0xF0
@@ -118,11 +155,13 @@ def parse_midi(path):
 
     notes.sort(key=lambda n: (n[0], -n[1]))
     bpm = 60_000_000 / initial_tempo_us if initial_tempo_us else 120.0
+    to_sec = _tempo_map_fn(tempos, ppq)
     return {
         "bpm": round(bpm, 3),
         "ppq": ppq,
         "notes": [
-            {"midi": m, "beat": round(t / ppq, 6), "velocity": v, "channel": ch}
+            {"midi": m, "beat": round(t / ppq, 6), "sec": round(to_sec(t), 6),
+             "velocity": v, "channel": ch}
             for (t, m, v, ch) in notes
         ],
     }
@@ -163,6 +202,8 @@ def import_midi_file(src_path, name=None):
     if not src.exists():
         raise FileNotFoundError(src)
     parsed = parse_midi(src)
+    if not parsed.get("notes"):
+        raise ValueError("no playable notes")
     if name is None:
         name = src.stem
     name = "".join(c for c in name if c.isalnum() or c in "-_") or "song"
@@ -271,7 +312,9 @@ def notes_for(name, channel=None):
 
 def next_note(name):
     """Advance the pointer for `name` and return the next MIDI note, or
-    None if no song is active or song has no notes after channel filter."""
+    None if no song is active, the song has no notes after channel filter, or
+    the state lock is contended (hook path: callers fall back to the melodic
+    picker rather than blow the hook's time budget)."""
     if not name:
         return None
     song = load_song(name)
@@ -288,7 +331,11 @@ def next_note(name):
         pos = int(positions.get(name, 0))
         result["note"] = int(notes[pos % len(notes)]["midi"])
         positions[name] = (pos + 1) % len(notes)
-    stateio.update_json(STATE_FILE, {}, mutate)
+    try:
+        stateio.update_json(STATE_FILE, {}, mutate, timeout=stateio.HOT_TIMEOUT,
+                            stale_after=stateio.HOT_STALE_AFTER)
+    except (stateio.LockTimeout, OSError):
+        return None
     return result["note"]
 
 

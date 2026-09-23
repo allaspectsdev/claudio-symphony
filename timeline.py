@@ -46,9 +46,11 @@ def read_session(session_id):
             if not ln:
                 continue
             try:
-                raw.append(json.loads(ln))
+                d = json.loads(ln)
             except Exception:
-                pass
+                continue
+            if isinstance(d, dict):
+                raw.append(d)
     except Exception:
         return None
     if not raw:
@@ -93,11 +95,18 @@ def replay_schedule(events, tempo=1.0, max_gap=2.5):
     at `max_gap` so a session where you stepped away doesn't replay minutes of
     silence — the heavy stretches stay dense, the dead air shrinks. `tempo`
     scales the result (>1 faster). Returns [(t, e, tool, f), …]."""
-    evs = sorted(events, key=lambda x: x.get("t", 0))
+    evs = sorted((e for e in events or [] if isinstance(e, dict)),
+                 key=lambda x: x.get("t", 0))
     out = []
     prev_raw = None
     cur = 0.0
-    tempo = float(tempo or 1.0) or 1.0
+    try:
+        tempo = float(tempo or 1.0)
+    except (TypeError, ValueError):
+        tempo = 1.0
+    if tempo != tempo or tempo == 0:          # NaN / zero → normal speed
+        tempo = 1.0
+    tempo = max(0.25, min(4.0, tempo))        # same range as the web UI slider
     for e in evs:
         raw = e.get("t", 0)
         if prev_raw is not None:
@@ -134,6 +143,7 @@ def load_score_file(path):
     try:
         d = json.loads(Path(path).read_text())
         if isinstance(d, dict) and isinstance(d.get("events"), list):
+            d["events"] = [e for e in d["events"] if isinstance(e, dict)]
             return d
     except Exception:
         pass

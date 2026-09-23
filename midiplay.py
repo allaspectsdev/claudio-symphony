@@ -22,7 +22,7 @@ Pure stdlib. Reuses event.py for sample-selection + playback + recording, and
 song.py for the SMF parser. Runs as a foreground or detached process; webui.py
 and `claudio play` drive it.
 """
-import sys, os, json, time, signal, random, threading
+import sys, os, json, time, signal, random
 from collections import deque
 from pathlib import Path
 
@@ -33,6 +33,7 @@ import song as song_mod     # noqa: E402  SMF parser + song library
 import timeline as tl       # noqa: E402  session timeline reader (replay source)
 import stateio              # noqa: E402
 import paths                # noqa: E402
+import audio                # noqa: E402  portable pid_alive / terminate_pid
 
 STATE = paths.STATE_DIR
 PLAY_DIR = STATE / "midiplay"
@@ -52,6 +53,25 @@ PERFORM_EVENT_ORDER = [
 # one tick is not.
 _BURST_WINDOW_S = 0.12
 _BURST_MAX = 18
+
+# Playback-speed bounds — same range the web UI's tempo slider allows.
+TEMPO_MIN, TEMPO_MAX = 0.25, 4.0
+# A looped pass never repeats faster than this, so a ~0-length schedule can't
+# spin firing notes as fast as the burst guard lets through.
+_MIN_PASS_S = 0.5
+
+
+def clamp_tempo(tempo):
+    """Coerce a tempo multiplier into [TEMPO_MIN, TEMPO_MAX]; junk → 1.0."""
+    try:
+        t = float(tempo if tempo is not None else 1.0)
+    except (TypeError, ValueError):
+        return 1.0
+    if t != t or t in (float("inf"), float("-inf")):   # NaN / inf
+        return 1.0
+    if t == 0:
+        return 1.0
+    return max(TEMPO_MIN, min(TEMPO_MAX, t))
 
 
 # ---------- atomic json ----------
@@ -268,39 +288,70 @@ def _register_label(midi):
     return "high"
 
 
-def _song_duration(song, bpm=None):
+def _note_time_fn(song, bpm=None, tempo=1.0):
+    """note → onset seconds. An explicit `bpm` override plays the beats on a
+    flat grid; otherwise the per-note `sec` (full tempo map, from song.py) is
+    used when every note carries it, falling back to beats at the file bpm for
+    older song JSON. `tempo` (clamped) scales either way."""
+    tempo = clamp_tempo(tempo)
+    notes = song.get("notes") or []
+    if bpm is None and notes and all("sec" in n for n in notes):
+        return lambda n: float(n["sec"]) / tempo
+    try:
+        b = float(bpm or song.get("bpm") or 120.0)
+    except (TypeError, ValueError):
+        b = 120.0
+    if not b > 0:
+        b = 120.0
+    beat_s = 60.0 / (b * tempo)
+    return lambda n: n["beat"] * beat_s
+
+
+def _song_duration(song, bpm=None, tempo=1.0):
     notes = song.get("notes") or []
     if not notes:
         return 0.0
-    bpm = float(bpm or song.get("bpm") or 120.0)
-    last_beat = max(n["beat"] for n in notes)
-    return last_beat * (60.0 / bpm)
+    t = _note_time_fn(song, bpm, tempo)
+    return max(t(n) for n in notes)
 
 
 # ---------- firing one note ----------
 
+def _voice_samples(vsrc_name, voice, cfg, cache=None):
+    """(samples, pitched[(midi, path)]) for a voice, memoised in `cache` so a
+    performance lists each sample dir once instead of once per note."""
+    key = (vsrc_name, voice)
+    if cache is not None and key in cache:
+        return cache[key]
+    samples = ev.list_samples(vsrc_name, cfg.get("dir", voice))
+    pitched = []
+    for s in samples or []:
+        m = ev._parse_midi(s.name)
+        if m is not None:
+            pitched.append((m, s))
+    out = (samples, pitched)
+    if cache is not None:
+        cache[key] = out
+    return out
+
+
 def _fire(preset_name, preset, master, event_name, voice, target_midi, velocity,
-          src_name=None, src_preset=None):
+          src_name=None, src_preset=None, _cache=None):
     """Select a sample for `voice` landing on `target_midi`, play it through
     event.play() (which also feeds the recording timeline), and touch the
     activity markers so the UI blooms. Velocity scales gain subtly. When the
     voice was picked from another preset (src_name/src_preset), its config and
-    samples come from there; markers still land on the performing preset."""
+    samples come from there; markers still land on the performing preset.
+    `_cache` (a dict) memoises the sample listing across calls."""
     vsrc_name = src_name or preset_name
     vsrc = src_preset or preset
     voices = vsrc.get("voices", {})
     cfg = voices.get(voice)
     if cfg is None:
         return
-    samples = ev.list_samples(vsrc_name, cfg.get("dir", voice))
+    samples, pitched = _voice_samples(vsrc_name, voice, cfg, _cache)
     if not samples:
         return
-
-    pitched = []
-    for s in samples:
-        m = ev._parse_midi(s.name)
-        if m is not None:
-            pitched.append((m, s))
 
     if pitched:
         path, shift = ev._nearest_pitched(pitched, int(target_midi))
@@ -338,17 +389,18 @@ def _fire(preset_name, preset, master, event_name, voice, target_midi, velocity,
 
 # ---------- the performance loop ----------
 
-def _build_schedule(song, mapping, bpm):
+def _build_schedule(song, mapping, bpm=None, tempo=1.0):
     """Flatten the song into [(time_s, channel, event, midi, velocity), …] for
-    the mapped channels only, sorted by time."""
-    beat_s = 60.0 / float(bpm)
+    the mapped channels only, sorted by time. Times follow the song's tempo map
+    (per-note `sec`) unless `bpm` overrides it; see _note_time_fn."""
+    at = _note_time_fn(song, bpm, tempo)
     sched = []
     for n in song.get("notes") or []:
         ch = n["channel"]
         evname = mapping.get(ch)
         if not evname:
             continue
-        sched.append((n["beat"] * beat_s, ch, evname, n["midi"], n.get("velocity", 96)))
+        sched.append((at(n), ch, evname, n["midi"], n.get("velocity", 96)))
     sched.sort(key=lambda x: x[0])
     return sched
 
@@ -358,15 +410,36 @@ def _perform_master(preset):
     return float(ev.read_config().get("master_gain", preset.get("master_gain", 0.5)))
 
 
-def _run_loop(sched, fire_one, on_tick=None, _stop=None, loop=False, on_loop_start=None):
+def _pass_len(sched, tail):
+    """Length of one looped pass: last onset plus a `tail` (≈ one beat) so the
+    final note rings before the top of the next pass, never under _MIN_PASS_S."""
+    last = max((t for t, _ in sched), default=0.0)
+    return max(last + max(0.0, float(tail or 0.0)), _MIN_PASS_S)
+
+
+def _sleep_until(target, stop):
+    while True:
+        dt = target - time.time()
+        if dt <= 0 or stop.get("stop"):
+            return
+        time.sleep(min(dt, 0.05))
+
+
+def _run_loop(sched, fire_one, on_tick=None, _stop=None, loop=False, on_loop_start=None,
+              pass_len=None):
     """Shared real-time scheduler for the jukebox AND session replay. `sched` is
     a list of (t_seconds, item); `fire_one(item)` plays it. Sleeps to each note's
     wall-clock target, drops notes over the burst cap (fork-bomb guard), and
-    repeats while `loop`. `on_loop_start()` runs before each pass (replay uses it
-    to reset its in-memory rate-limit)."""
+    repeats while `loop`. When looping, each pass lasts `pass_len` seconds
+    (default: last onset + 0.5s, floored at _MIN_PASS_S) before restarting.
+    `on_loop_start()` runs before each pass (replay uses it to reset its
+    in-memory rate-limit)."""
     stop = _stop if _stop is not None else {"stop": False}
     recent = deque()       # onset times, for the burst guard
     total = len(sched)
+    if pass_len is None:
+        pass_len = _pass_len(sched, 0.5)
+    pass_len = max(float(pass_len), _MIN_PASS_S)
     while not stop.get("stop"):
         if on_loop_start:
             on_loop_start()
@@ -374,12 +447,7 @@ def _run_loop(sched, fire_one, on_tick=None, _stop=None, loop=False, on_loop_sta
         for idx, (t, item) in enumerate(sched):
             if stop.get("stop"):
                 break
-            target = t0 + t
-            while True:
-                dt = target - time.time()
-                if dt <= 0 or stop.get("stop"):
-                    break
-                time.sleep(min(dt, 0.05))
+            _sleep_until(t0 + t, stop)
             if stop.get("stop"):
                 break
             now = time.time()
@@ -393,6 +461,7 @@ def _run_loop(sched, fire_one, on_tick=None, _stop=None, loop=False, on_loop_sta
                 on_tick(idx + 1, total, now - t0)
         if not loop or stop.get("stop"):
             break
+        _sleep_until(t0 + pass_len, stop)        # let the pass finish before looping
 
 
 def perform(song_name, preset_name=None, bpm=None, tempo=1.0, loop=False,
@@ -406,7 +475,8 @@ def perform(song_name, preset_name=None, bpm=None, tempo=1.0, loop=False,
     preset = ev.load_preset(preset_name)
     if not song or not preset:
         return False
-    eff_bpm = float(bpm or song.get("bpm") or 120.0) * float(tempo or 1.0)
+    tempo = clamp_tempo(tempo)
+    eff_bpm = float(bpm or song.get("bpm") or 120.0) * tempo
     full_map = auto_map(song, preset)
     if mapping:
         for k, v in mapping.items():
@@ -418,7 +488,7 @@ def perform(song_name, preset_name=None, bpm=None, tempo=1.0, loop=False,
                 full_map.pop(ch, None)
             else:
                 full_map[ch] = v
-    raw = _build_schedule(song, full_map, eff_bpm)
+    raw = _build_schedule(song, full_map, bpm, tempo)
     if not raw:
         return False
     master = _perform_master(preset)
@@ -432,21 +502,41 @@ def perform(song_name, preset_name=None, bpm=None, tempo=1.0, loop=False,
             if src not in srcs:
                 srcs[src] = ev.load_preset(src)
 
+    # resolve each token once (token_voice may read a preset from disk)
+    resolved = {tok: token_voice(tok, preset) for tok in set(full_map.values())}
+    sample_cache = {}
+
     def fire(item):
         token, midi, vel = item
-        evname, voice, src = token_voice(token, preset)  # event | voice | preset/voice
+        evname, voice, src = resolved[token]              # event | voice | preset/voice
         if voice:
             _fire(preset_name, preset, master, evname, voice, midi, vel,
-                  src_name=src, src_preset=srcs.get(src) if src else None)
+                  src_name=src, src_preset=srcs.get(src) if src else None,
+                  _cache=sample_cache)
 
-    _run_loop(sched, fire, on_tick=on_tick, _stop=_stop, loop=loop)
+    beat_s = 60.0 / eff_bpm if eff_bpm > 0 else 0.5
+    _run_loop(sched, fire, on_tick=on_tick, _stop=_stop, loop=loop,
+              pass_len=_pass_len(sched, beat_s))
     return True
 
 
 # ---------- lifecycle (foreground process owns active.json) ----------
 
+def _owned_by_me(path):
+    meta = _load(path)
+    return isinstance(meta, dict) and meta.get("pid") == os.getpid()
+
+
 def status():
     meta = _load(ACTIVE)
+    # POSIX only: on Windows pid_alive shells out to tasklist, too heavy for a
+    # status poll — there a stale claim is cleared by the next stop/run instead.
+    if meta and not audio.IS_WIN and not (
+            isinstance(meta, dict) and audio.pid_alive(meta.get("pid"))):
+        # performer died without cleaning up (SIGKILL, crash): drop the stale claim
+        try: ACTIVE.unlink()
+        except Exception: pass
+        meta = None
     out = {"active": bool(meta)}
     if meta:
         out.update(meta)
@@ -460,15 +550,10 @@ def stop_running():
     meta = _load(ACTIVE)
     if not meta:
         return False
-    pid = meta.get("pid")
-    if pid:
-        try:
-            os.kill(int(pid), signal.SIGTERM)
-            return True
-        except ProcessLookupError:
-            pass
-        except Exception:
-            pass
+    pid = meta.get("pid") if isinstance(meta, dict) else None
+    if pid and pid != os.getpid() and audio.pid_alive(pid):
+        audio.terminate_pid(pid)
+        return True
     try:
         ACTIVE.unlink()
     except Exception:
@@ -481,6 +566,7 @@ def _run_performance(meta_extra, duration, total, perform_fn):
     install SIGTERM/SIGINT, run perform_fn(on_tick, _stop) with throttled
     progress writes (~12/s), then clean up. One performance at a time."""
     PLAY_DIR.mkdir(parents=True, exist_ok=True)
+    stop_running()                     # one performance at a time: evict any other
     _save(ACTIVE, {"pid": os.getpid(), "start": time.time(),
                    "duration": round(duration, 2), "total_notes": total, **meta_extra})
     _save(PROGRESS, {"idx": 0, "total": total, "elapsed": 0.0, "playing": True})
@@ -496,10 +582,13 @@ def _run_performance(meta_extra, duration, total, perform_fn):
     try:
         perform_fn(_tick, stop)
     finally:
-        try: ACTIVE.unlink()
-        except Exception: pass
-        try: _save(PROGRESS, {"playing": False})
-        except Exception: pass
+        # A newer performer may have claimed active.json while we wound down —
+        # only clean up state that is still ours.
+        if _owned_by_me(ACTIVE):
+            try: ACTIVE.unlink()
+            except Exception: pass
+            try: _save(PROGRESS, {"playing": False})
+            except Exception: pass
     return True
 
 
@@ -514,10 +603,11 @@ def run(song_name, preset_name=None, bpm=None, tempo=1.0, loop=False, mapping=No
     if not p or not p.get("channels"):
         print("nothing to play (no mappable channels / voices)")
         return False
-    eff_bpm = float(bpm or p["bpm"]) * float(tempo or 1.0)
-    duration = _song_duration(song_mod.load_song(song_name), eff_bpm)
+    tempo = clamp_tempo(tempo)
+    eff_bpm = float(bpm or p["bpm"]) * tempo
+    duration = _song_duration(song_mod.load_song(song_name), bpm, tempo)
     meta = {"kind": "jukebox", "song": song_name, "preset": preset_name,
-            "bpm": round(eff_bpm, 2), "tempo": float(tempo or 1.0), "loop": bool(loop),
+            "bpm": round(eff_bpm, 2), "tempo": tempo, "loop": bool(loop),
             "channels": p["channels"]}
     return _run_performance(meta, duration, p["total_notes"],
         lambda on_tick, _stop: perform(song_name, preset_name, bpm=bpm, tempo=tempo,
@@ -574,6 +664,7 @@ def _replay_fire(preset_name, preset, master, mioi_last, e, tool, fail):
 def perform_score(events, preset_name, preset, tempo=1.0, loop=False,
                   max_gap=2.5, on_tick=None, _stop=None):
     """Replay a list of captured events in real time through `preset`."""
+    tempo = clamp_tempo(tempo)
     raw = tl.replay_schedule(events, tempo=tempo, max_gap=max_gap)
     if not raw:
         return False
@@ -587,7 +678,7 @@ def perform_score(events, preset_name, preset, tempo=1.0, loop=False,
 
     # reset the in-memory rate-limit at each loop restart (matches prior behavior)
     _run_loop(sched, fire, on_tick=on_tick, _stop=_stop, loop=loop,
-              on_loop_start=mioi_last.clear)
+              on_loop_start=mioi_last.clear, pass_len=_pass_len(sched, 1.0 / tempo))
     return True
 
 
@@ -606,9 +697,10 @@ def run_score(session_id, preset_name=None, tempo=1.0, loop=False, max_gap=2.5):
         print(f"no preset '{preset_name}'")
         return False
     events = score["events"]
+    tempo = clamp_tempo(tempo)
     duration = tl.replay_duration(events, tempo, max_gap)
     meta = {"kind": "replay", "session": session_id, "preset": preset_name,
-            "tempo": float(tempo or 1.0), "loop": bool(loop)}
+            "tempo": tempo, "loop": bool(loop)}
     return _run_performance(meta, duration, len(events),
         lambda on_tick, _stop: perform_score(events, preset_name, preset, tempo=tempo,
                                              loop=loop, max_gap=max_gap, on_tick=on_tick, _stop=_stop))
@@ -628,11 +720,64 @@ def _parse_map_arg(s):
     return out
 
 
+USAGE = ("usage: midiplay.py <song> [--preset NAME] [--bpm N] [--tempo X] "
+         "[--loop] [--map ch=Event,...]\n"
+         "       midiplay.py replay <session_id> [--preset N] [--tempo X] [--loop] [--max-gap S]\n"
+         "       midiplay.py stop | status | plan <song> [--preset NAME]")
+
+
+class _UsageError(Exception):
+    pass
+
+
+def _parse_opts(argv, value_opts, flag_opts=()):
+    """Parse `--opt VALUE` / `--flag` pairs. value_opts maps option → converter
+    (str, float, …). Unknown args are ignored (as before); a missing or
+    unparseable value raises _UsageError."""
+    out = {}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in value_opts:
+            if i + 1 >= len(argv):
+                raise _UsageError(f"{a} needs a value")
+            try:
+                out[a] = value_opts[a](argv[i + 1])
+            except (TypeError, ValueError):
+                raise _UsageError(f"bad value for {a}: {argv[i + 1]!r}")
+            i += 2
+        elif a in flag_opts:
+            out[a] = True; i += 1
+        else:
+            i += 1
+    return out
+
+
+def _pos_float(v):
+    f = float(v)
+    if not f > 0 or f == float("inf"):
+        raise ValueError(v)
+    return f
+
+
+def _nonneg_float(v):
+    f = float(v)
+    if not f >= 0 or f == float("inf"):
+        raise ValueError(v)
+    return f
+
+
 def main(argv):
+    try:
+        return _main(argv)
+    except _UsageError as e:
+        print(f"midiplay: {e}\n{USAGE}", file=sys.stderr)
+        return 2
+
+
+def _main(argv):
     if not argv or argv[0] in ("-h", "--help", "help"):
-        print("usage: midiplay.py <song> [--preset NAME] [--bpm N] [--tempo X] "
-              "[--loop] [--map ch=Event,...]\n"
-              "       midiplay.py stop | status | plan <song> [--preset NAME]")
+        print(USAGE)
         return 0
     cmd = argv[0]
     if cmd == "stop":
@@ -642,42 +787,26 @@ def main(argv):
             print("usage: midiplay.py replay <session_id> [--preset N] [--tempo X] [--loop] [--max-gap S]")
             return 1
         sid = argv[1]
-        preset = None; tempo = 1.0; loop = False; max_gap = 2.5
-        i = 2
-        while i < len(argv):
-            a = argv[i]
-            if a == "--preset" and i + 1 < len(argv): preset = argv[i + 1]; i += 2
-            elif a == "--tempo" and i + 1 < len(argv): tempo = float(argv[i + 1]); i += 2
-            elif a == "--max-gap" and i + 1 < len(argv): max_gap = float(argv[i + 1]); i += 2
-            elif a == "--loop": loop = True; i += 1
-            else: i += 1
-        run_score(sid, preset, tempo=tempo, loop=loop, max_gap=max_gap)
+        o = _parse_opts(argv[2:], {"--preset": str, "--tempo": _pos_float,
+                                   "--max-gap": _nonneg_float}, ("--loop",))
+        run_score(sid, o.get("--preset"), tempo=clamp_tempo(o.get("--tempo", 1.0)),
+                  loop=bool(o.get("--loop")), max_gap=o.get("--max-gap", 2.5))
         return 0
     if cmd == "status":
         print(json.dumps(status(), indent=2)); return 0
     if cmd == "plan":
         if len(argv) < 2:
             print("usage: midiplay.py plan <song> [--preset NAME]"); return 1
-        preset = None
-        if "--preset" in argv:
-            preset = argv[argv.index("--preset") + 1]
+        preset = _parse_opts(argv[2:], {"--preset": str}).get("--preset")
         print(json.dumps(plan(argv[1], preset or ev.active_preset_name()), indent=2))
         return 0
 
     song_name = cmd
-    preset = bpm = mapping = None
-    tempo = 1.0
-    loop = False
-    i = 1
-    while i < len(argv):
-        a = argv[i]
-        if a == "--preset" and i + 1 < len(argv): preset = argv[i + 1]; i += 2
-        elif a == "--bpm" and i + 1 < len(argv): bpm = float(argv[i + 1]); i += 2
-        elif a == "--tempo" and i + 1 < len(argv): tempo = float(argv[i + 1]); i += 2
-        elif a == "--map" and i + 1 < len(argv): mapping = _parse_map_arg(argv[i + 1]); i += 2
-        elif a == "--loop": loop = True; i += 1
-        else: i += 1
-    run(song_name, preset, bpm=bpm, tempo=tempo, loop=loop, mapping=mapping)
+    o = _parse_opts(argv[1:], {"--preset": str, "--bpm": _pos_float, "--tempo": _pos_float,
+                               "--map": _parse_map_arg}, ("--loop",))
+    run(song_name, o.get("--preset"), bpm=o.get("--bpm"),
+        tempo=clamp_tempo(o.get("--tempo", 1.0)), loop=bool(o.get("--loop")),
+        mapping=o.get("--map"))
     return 0
 
 
