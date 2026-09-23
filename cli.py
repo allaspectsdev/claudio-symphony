@@ -2077,4 +2077,9 @@ def main(argv):
     return _err(f"claudio: unknown command '{cmd}' (see claudio --help)", 2)
 
 if __name__ == "__main__":
+    # Windows pipes/redirects default to a legacy code page that can't encode
+    # the ✓/🔊 glyphs in our output; degrade them instead of crashing.
+    for _stream in (sys.stdout, sys.stderr):
+        try: _stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError): pass
     sys.exit(main(sys.argv[1:]) or 0)

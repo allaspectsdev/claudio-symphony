@@ -21,7 +21,7 @@ class SafePathTests(unittest.TestCase):
         self.assertIsNone(webui.load_preset("../../tmp"))
 
     def test_persisted_html_fields_are_escaped(self):
-        source = (HERE / "web" / "app.js").read_text()
+        source = (HERE / "web" / "app.js").read_text(encoding="utf-8")
         self.assertIn("esc(s.cwd || s.id)", source)
         self.assertIn("esc(s.base)", source)
         self.assertIn("esc(r.pattern)", source)

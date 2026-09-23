@@ -79,7 +79,7 @@ class StateIOTests(unittest.TestCase):
                 with self.assertRaises(stateio.LockTimeout):
                     with stateio.file_lock(path, timeout=stateio.HOT_TIMEOUT):
                         pass
-                self.assertLess(time.monotonic() - start, 0.6)
+                self.assertLess(time.monotonic() - start, 0.9)
             # Released on exit: immediately acquirable again.
             with stateio.file_lock(path, timeout=0):
                 pass
@@ -115,8 +115,12 @@ class RuntimeTransactionTests(unittest.TestCase):
             root = Path(td)
             sessions = root / "sessions.json"
             timeline = root / "timeline"
+            # Serialization, not the bounded hot-path wait, is under test here
+            # (test_held_lock_times_out_quickly covers that): 100 hooks in one
+            # process would otherwise queue past HOT_TIMEOUT on slow CI hosts.
             with mock.patch.object(event, "SESSIONS_FILE", sessions), \
-                 mock.patch.object(event, "TIMELINE", timeline):
+                 mock.patch.object(event, "TIMELINE", timeline), \
+                 mock.patch.object(event, "LOCK_KW", {"timeout": 10.0}):
                 def update(i):
                     event.update_session_record(f"session-{i}", f"/tmp/project-{i}",
                                                 "PostToolUse", "meadow", "default")
@@ -134,7 +138,8 @@ class RuntimeTransactionTests(unittest.TestCase):
             state = Path(td) / "song.json"
             stateio.save_json(state, {"channel": {"demo": "all"}})
             with mock.patch.object(song, "STATE_FILE", state), \
-                 mock.patch.object(song, "load_song", return_value=fake_song):
+                 mock.patch.object(song, "load_song", return_value=fake_song), \
+                 mock.patch.object(stateio, "HOT_TIMEOUT", 10.0):
                 with ThreadPoolExecutor(max_workers=20) as pool:
                     played = list(pool.map(lambda _: song.next_note("demo"), range(50)))
             self.assertEqual(sorted(played), list(range(60, 110)))

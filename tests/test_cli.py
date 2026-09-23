@@ -19,7 +19,9 @@ class CliTestCase(unittest.TestCase):
         self._data = tempfile.TemporaryDirectory()
         self.home = Path(self._home.name)
         self.env = os.environ.copy()
-        self.env.update(HOME=self._home.name, CLAUDIO_HOME=self._data.name)
+        # USERPROFILE: Path.home() ignores HOME on Windows.
+        self.env.update(HOME=self._home.name, USERPROFILE=self._home.name,
+                        CLAUDIO_HOME=self._data.name)
         self.env.pop("CLAUDE_PLUGIN_ROOT", None)
         self.settings = self.home / ".claude" / "settings.json"
 

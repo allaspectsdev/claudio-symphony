@@ -41,7 +41,7 @@ def _lock_path(path: Path) -> Path:
 # compatibility but no longer needed: locks are kernel advisory locks, which
 # the OS releases the instant the holder exits — even when a hook is killed
 # mid-transaction — so an orphaned lock cannot silence other sessions.
-HOT_TIMEOUT = 0.25
+HOT_TIMEOUT = 0.5
 HOT_STALE_AFTER = 3.0
 
 try:
@@ -92,7 +92,7 @@ def file_lock(path, timeout=5.0, stale_after=None):
         while not _try_lock(fd):
             if time.monotonic() >= deadline:
                 raise LockTimeout(f"timed out waiting for {lock}")
-            time.sleep(random.uniform(0.005, 0.02))
+            time.sleep(random.uniform(0.002, 0.01))
     except BaseException:
         os.close(fd)
         raise
