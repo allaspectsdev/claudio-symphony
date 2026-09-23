@@ -14,11 +14,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent      # plugin / repo root (bin/..)
 sys.path.insert(0, str(ROOT))
-import paths
-
-STATE = paths.STATE_DIR
-LOGS = paths.LOG_DIR
-NOTE = LOGS / "SETUP_NEEDED.txt"
 
 
 def have_numpy():
@@ -30,8 +25,10 @@ def have_numpy():
 
 
 def main():
-    STATE.mkdir(parents=True, exist_ok=True)
-    LOGS.mkdir(parents=True, exist_ok=True)
+    import paths                                    # inside main's guard: a broken
+    NOTE = paths.LOG_DIR / "SETUP_NEEDED.txt"       # data dir must not print a traceback
+    paths.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    paths.LOG_DIR.mkdir(parents=True, exist_ok=True)
     if have_numpy():
         try: NOTE.unlink()                          # setup done; event.py renders on demand
         except Exception: pass

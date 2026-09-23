@@ -31,6 +31,33 @@ class PlatformPathTests(unittest.TestCase):
             for value in json.loads(output):
                 self.assertTrue(Path(value).resolve().is_relative_to(resolved_home))
 
+    def test_import_survives_uncreatable_home(self):
+        with tempfile.TemporaryDirectory() as directory:
+            blocker = Path(directory) / "regular-file"
+            blocker.write_text("")
+            env = os.environ.copy()
+            env["CLAUDIO_HOME"] = str(blocker / "home")
+            proc = subprocess.run(
+                [sys.executable, "-c", "import paths; print(paths.STATE_DIR)"],
+                cwd=ROOT, env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stderr, "")
+            self.assertTrue(proc.stdout.strip().endswith("state"))
+
+    def test_completed_migration_skips_legacy_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "migration.json"
+            marker.write_text(json.dumps({"small_complete": True, "large_complete": True}))
+            scan = mock.Mock()
+            scan.iterdir.side_effect = AssertionError("legacy preset scan ran")
+            with mock.patch.object(paths, "MIGRATION_FILE", marker), \
+                 mock.patch.object(paths, "LEGACY_RECORDINGS_DIR", scan), \
+                 mock.patch.object(paths, "BUILTIN_PRESETS_DIR", scan):
+                status = paths.migration_status()
+            self.assertEqual(status["small_complete"], True)
+            self.assertEqual(status["large_complete"], True)
+
     def test_builtin_edit_becomes_user_overlay_and_reset_removes_it(self):
         original = preset_store.load("meadow")
         self.assertIsNotNone(original)

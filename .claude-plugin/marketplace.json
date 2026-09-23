@@ -6,7 +6,7 @@
     {
       "name": "claudio-symphony",
       "description": "Ambient music that moves with your Claude Code session. Tool calls, edits, and finished turns become soft, in-key sounds; 40 presets, a live web console, mic-jam, chord progressions, and a MIDI jukebox.",
-      "source": { "type": "git", "url": "https://github.com/allaspectsdev/claudio-symphony" },
+      "source": "./",
       "keywords": ["audio", "ambient", "music", "sonification", "hooks"]
     }
   ]

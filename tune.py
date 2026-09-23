@@ -25,7 +25,7 @@ per-event delay/echo (off → subtle → medium → long → echo).
 Reverb_scale changes require regen; the TUI flags it on save and you can run
 `claudio regen <preset>` (or 'r' inside the TUI) to apply.
 """
-import json, time, os, sys, math, random
+import time, sys, math, random
 from pathlib import Path
 try:
     import curses
@@ -86,7 +86,7 @@ class TuneUI:
         self.stdscr = stdscr
         self.config = config_store.load(CONFIG)
         names = list_preset_names()
-        self.preset_name = self.config.get("preset", "cathedral")
+        self.preset_name = self.config.get("preset", config_store.DEFAULT_PRESET)
         if self.preset_name not in names and names:
             self.preset_name = names[0]
         self.preset = self._load_preset(self.preset_name)

@@ -20,7 +20,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from synth import (SR, A4, freq, t_axis, adsr, soft_clip, lowpass_fft,
+from synth import (SR, freq, t_axis, adsr, lowpass_fft,
                     reverb_stereo, write_wav)
 
 import json as _json
@@ -308,7 +308,6 @@ def voice_wind_breath(seed):
     """A gentle wind-breath texture — near-dry soft air, the mountain breeze
     itself. A slow swell of band-limited air-noise with a barely-there breathy
     pitch shimmer, rising and falling like a calm gust. Soft, warm, quiet."""
-    rng = np.random.default_rng(int(seed))
     dur = 2.2
     n = int(dur * SR); t = t_axis(dur)
 

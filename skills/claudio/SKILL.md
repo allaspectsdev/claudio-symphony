@@ -5,7 +5,7 @@ description: Use when the user wants to control or understand Claudio Symphony �
 
 # Claudio Symphony
 
-Claudio turns Claude Code hook events into soft, in-key ambient music. It's installed as a plugin (hooks already wired) or via `./bin/claudio install`. The `claudio` CLI is on PATH when the plugin is active; otherwise call `./bin/claudio` from the repo.
+Claudio turns Claude Code hook events into soft, in-key ambient music. It's installed as a plugin (hooks already wired) or via `bin/claudio install` from a clone. When the plugin is active, `claudio` is on the PATH of *your* (Claude's) Bash tool only — not the user's own terminal. So run `claudio …` commands for the user; if they want to run things themselves, give them the full path (`<plugin-or-repo>/bin/claudio …`, or `python3 <plugin-or-repo>/cli.py …`). For first-time setup, run `claudio setup` for them (or they can run `python3 <plugin-or-repo>/install.py`).
 
 ## Most common things people ask for
 
@@ -13,7 +13,7 @@ Claudio turns Claude Code hook events into soft, in-key ambient music. It's inst
 - **Change the sound / vibe**: `claudio preset use <name>` (e.g. `meadow`, `cathedral`, `rainfall`, `koto`, `studio`). List them with `claudio preset list`; hear them with `claudio audition`.
 - **Make it quieter / off**: `claudio volume 0.3`, or `claudio off` / `claudio on`.
 - **Turn on the drone bed**: `claudio drone on` (only some presets have one — `cathedral` does). It follows the key live.
-- **Record a clip to share**: `claudio record 30` (saves to `recordings/`), or hit **Rec** in `claudio web`.
+- **Record a clip to share**: `claudio record 30` (it prints the saved file's full path; `claudio record list` shows the folder), or hit **Rec** in `claudio web`.
 - **Jam with it**: open `claudio web`, hit **🎤 Listen**, and hum — it re-keys to your note. Headphones + Options → Mic monitor lets you play through its reverb.
 
 ## If it's silent
@@ -28,4 +28,4 @@ Common causes it surfaces:
 
 ## Full command reference
 
-`claudio` with no args (or `claudio --help`) prints every command — per-voice tuning, event→sound mapping, scales, chord progressions, the MIDI jukebox, session replay, and directory routing rules. Prefer the web console (`claudio web`) for anything visual or exploratory.
+`claudio --help` prints every command (bare `claudio` prints status; `claudio <command> --help` prints just that command's lines) — per-voice tuning, event→sound mapping, scales, chord progressions, the MIDI jukebox, session replay, and directory routing rules. Prefer the web console (`claudio web`) for anything visual or exploratory.

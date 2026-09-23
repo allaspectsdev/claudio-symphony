@@ -28,8 +28,8 @@ ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from synth import (
-    SR, A4, freq, t_axis, adsr, soft_clip, lowpass_fft,
-    reverb_stereo, to_stereo, write_wav,
+    SR, freq, t_axis, adsr, lowpass_fft,
+    reverb_stereo, write_wav,
 )
 
 # === reverb_scale monkeypatch ===

@@ -20,7 +20,7 @@ Install it as a Claude Code plugin — two lines, pasted right into Claude Code:
 /plugin install claudio-symphony
 ```
 
-The hooks wire themselves — no editing `settings.json`. Install the one synthesis dependency explicitly with `python3 -m pip install numpy`, then run **`claudio setup`** once to render sounds. Hooks never install packages or access the network on your behalf, and **`claudio doctor`** verifies everything anytime. Prefer a hands-on setup, or not using plugins? See [Install](#-install).
+The hooks wire themselves — no editing `settings.json`. Install the one synthesis dependency explicitly with `python3 -m pip install numpy`, then ask Claude to **run `claudio setup`** once to render sounds. Hooks never install packages or access the network on your behalf, and **`claudio doctor`** verifies everything anytime. Prefer a hands-on setup, or not using plugins? See [Install](#-install).
 
 > **macOS / Linux.** The plugin hooks call `python3`, which is standard there. On Windows `python3` often isn't on PATH — use the [manual install](#-install) (or alias `python3`) for now.
 
@@ -128,7 +128,7 @@ It stays out of its own way without any audio routing or extra dependencies: Cla
 
 **🎧 Headphone mode — the real jam setup.** Wearing headphones? Tell Claudio in **⋯ → Options** and Listen gets sharper: with the output in your ears the mic physically can't hear Claudio, so the listening-in-the-gaps filter switches off entirely and it tracks you continuously. Then flip on **Mic monitor** — mic passthrough with **Claudio's reverb and delay on your own voice or instrument**, straight into your headphones. You're processed into the same room Claudio is playing in, and now you can actually **jam with your Claudio**: it follows your key, you ride its texture. A **Monitor space** slider runs dry ↔ drenched. Monitoring is headphones-only by design, so it can never feed back through your speakers, and none of it leaves the browser.
 
-**Take it further: jam over changes.** Turn on a [chord progression](#-the-web-control-panel) (Music tab → Chord progression, or `claudio chords pop`) while Listen and the monitor are running — Claudio cycles the four-chord song (or your own changes) underneath you, in your key, while your voice floats through its reverb. A coding-session ambient system is now, quietly, a backing band.
+**Take it further: jam over changes.** Turn on a [chord progression](#️-the-web-control-panel) (Music tab → Chord progression, or `claudio chords pop`) while Listen and the monitor are running — Claudio cycles the four-chord song (or your own changes) underneath you, in your key, while your voice floats through its reverb. A coding-session ambient system is now, quietly, a backing band.
 
 ---
 
@@ -144,7 +144,7 @@ claudio record stop      # finish early and save right now
 claudio record list      # see your saved clips
 ```
 
-Here's the neat part: because Claudio already knows every sound it plays, recording **doesn't touch your mic or system audio** — it mixes the *exact* samples back into one clean track. Only Claudio, no room noise, no other apps, no virtual-audio-device setup. Clips land in `recordings/` as a `.wav` plus a small `.m4a` for easy sharing.
+Here's the neat part: because Claudio already knows every sound it plays, recording **doesn't touch your mic or system audio** — it mixes the *exact* samples back into one clean track. Only Claudio, no room noise, no other apps, no virtual-audio-device setup. Clips land in Claudio's data directory (`claudio record list` prints the exact path) as a `.wav` — plus a small `.m4a` for easy sharing on macOS.
 
 **Optional drone bed.** The drone stays **off** for everyday use, but recordings can opt into one (`--drone`, or the toggle in `claudio web`). It lays a low, A-rooted drone under the clip and **fades it in and out**, so the take feels like one cohesive piece rather than scattered sounds. Off by default — it's there when you want body, gone when you don't.
 
@@ -169,12 +169,14 @@ Paste these into Claude Code:
 /plugin install claudio-symphony
 ```
 
-The hooks wire themselves and the `claudio` command is on your PATH. Then install the synthesis dependency and render the sound library explicitly:
+The hooks wire themselves, and the `claudio` command is available to Claude's own shell. Install the synthesis dependency, then render the sound library — ask Claude to run `claudio setup`, or run the installer yourself:
 
 ```bash
 python3 -m pip install numpy
-claudio setup
+python3 ~/.claude/plugins/<…>/claudio-symphony/install.py   # or: ask Claude to run `claudio setup`
 ```
+
+> The plugin's `bin/` is only on the PATH of Claude's Bash tool. To use `claudio` in your own terminal, alias it: `alias claudio='<plugin root>/bin/claudio'` (`claudio doctor` prints the full path).
 
 Claudio's hooks never modify Python or install anything silently. If numpy is missing, a setup note is written to Claudio's platform log directory and `claudio doctor` prints the exact fix.
 
@@ -227,6 +229,7 @@ claudio audition                        # hear every preset, then pick one
 claudio test                            # walk every voice in the active preset
 claudio volume 0.4                      # master gain
 claudio coffee                          # ☕ support the project (see below)
+claudio --help                          # every command (claudio <cmd> --help for one)
 ```
 
 ### `claudio tune` — the interactive tuner
@@ -260,7 +263,8 @@ claudio map PostToolUse:on_failure -      # silence the failure variant
 claudio scale use A_lydian                # global scale override
 claudio root C                            # live-transpose the whole room (root off → back to A)
 claudio chords pop                        # cycle the four-chord song (chords Am F C G · every 12 · off)
-claudio song use mario                    # drive a voice from a MIDI melody
+claudio song import mario.mid            # add a MIDI file to your song library…
+claudio song use mario                    # …then drive a voice from its melody
 ```
 
 ---
@@ -277,11 +281,10 @@ claudio song use mario                    # drive a voice from a MIDI melody
 ```
 presets/<your-preset>/
 ├── preset.json    # voice configs + event → voice mapping
-├── render.py      # generates the WAV samples
-└── samples/       # output (gitignored — generated by render.py)
+└── render.py      # generates the WAV samples (into Claudio's cache dir, not the repo)
 ```
 
-`render.py` imports the shared DSP helpers from the top-level `synth.py` (FFT-convolved reverb, ADSR envelopes, FFT lowpass, A = 432 frequency math) and writes WAVs into `samples/<voice>/`.
+`render.py` imports the shared DSP helpers from the top-level `synth.py` (FFT-convolved reverb, ADSR envelopes, FFT lowpass, A = 432 frequency math) and writes WAVs into `<cache>/samples/<preset>/<voice>/` (set by `CLAUDIO_SAMPLES_DIR`).
 
 There's a full [composer's brief](docs/SONIC_FRAMEWORK.md) covering scale choices, palette design, and the anti-machine-gun strategies (per-voice MIOI, pressure accumulators, voice stealing, reverb-as-glue). **If you build a room you love, open a PR — we'd genuinely love to hear it.**
 
@@ -305,7 +308,7 @@ event.py  (~50 ms total)
    (your speakers)
 ```
 
-`event.py` is stateless except for tiny per-voice timestamp files. `drone.py` is the only long-running process, and it auto-exits after 10 minutes of silence. No daemon to babysit, no port to conflict, no config server. Pure Python, one dependency.
+`event.py` keeps only tiny state files (per-voice timestamps, session bookkeeping, and the symbolic timeline used for replay), guarded by kernel file locks that release instantly if a hook is killed. The only background process hooks ever start is `drone.py`, and it auto-exits after 10 minutes of silence (the web console, recorder, and jukebox run only when you ask for them). No daemon to babysit, no port to conflict, no config server. Pure Python, one dependency.
 
 ---
 

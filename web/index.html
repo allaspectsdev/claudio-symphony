@@ -49,9 +49,9 @@
         <input type="range" class="r vol" id="master" min="0" max="1" step="0.01">
         <span class="val" id="masterVal" style="font:11px/1 var(--mono);color:var(--muted)">—</span>
       </div>
-      <div class="power" id="power" title="Toggle Claudio on/off">
-        <span class="knob"></span><span class="lbl">···</span>
-      </div>
+      <button type="button" class="power" id="power" title="Toggle Claudio on/off" aria-label="Claudio sound on/off" aria-pressed="false">
+        <span class="knob" aria-hidden="true"></span><span class="lbl">···</span>
+      </button>
     </header>
 
     <div class="muted-banner">◍ muted — claudio is silent</div>
@@ -91,12 +91,12 @@
           <div class="constellation">
             <canvas id="sky"></canvas>
             <div class="const-hint" id="constHint">live voices · click an orb to hear it · orbs bloom as Claude plays</div>
-            <div class="viz-switch" id="vizSwitch">
-              <button data-viz="orbs" title="Constellation — orbs that bloom and nudge each other">✦</button>
-              <button data-viz="pond" title="Pond — every sound is a ripple">◍</button>
-              <button data-viz="tides" title="Tides — each voice is a flowing ribbon">≈</button>
-              <button data-viz="flow" title="Flow — a current that sprays particles">❋</button>
-              <button data-viz="gravity" title="Gravity — voices are stars; sounds fling orbiters">✸</button>
+            <div class="viz-switch" id="vizSwitch" role="group" aria-label="Visualization style">
+              <button data-viz="orbs" aria-label="Constellation view" title="Constellation — orbs that bloom and nudge each other">✦</button>
+              <button data-viz="pond" aria-label="Pond view" title="Pond — every sound is a ripple">◍</button>
+              <button data-viz="tides" aria-label="Tides view" title="Tides — each voice is a flowing ribbon">≈</button>
+              <button data-viz="flow" aria-label="Flow view" title="Flow — a current that sprays particles">❋</button>
+              <button data-viz="gravity" aria-label="Gravity view" title="Gravity — voices are stars; sounds fling orbiters">✸</button>
             </div>
           </div>
 
@@ -157,7 +157,7 @@
             <div class="juke-pick">
               <select class="vsel" id="jukeSong"></select>
               <label class="juke-import" id="jukeImportLbl" title="Drop in any Standard MIDI File">＋ import .mid
-                <input type="file" id="jukeImport" accept=".mid,.midi" hidden>
+                <input type="file" id="jukeImport" accept=".mid,.midi" class="sr-only">
               </label>
             </div>
           </div>
@@ -165,7 +165,7 @@
             <button class="juke-play" id="jukePlay">▶ Play</button>
             <button class="juke-loop" id="jukeLoop" title="Loop the song">⟳ loop</button>
           </div>
-          <div class="juke-bar" id="jukeBar"><span id="jukeBarFill"></span><i id="jukeBarHead"></i></div>
+          <div class="juke-bar" id="jukeBar" aria-hidden="true"><span id="jukeBarFill"></span><i id="jukeBarHead"></i></div>
           <div class="juke-time" id="jukeTime">0:00</div>
           <div class="juke-field">
             <label class="juke-lbl">Tempo</label>
@@ -185,48 +185,48 @@
   </div>
 
   <!-- preset browser overlay -->
-  <div class="browser" id="browser" hidden>
+  <div class="browser" id="browser" role="dialog" aria-modal="true" aria-labelledby="browserTitle" hidden>
     <div class="browser-panel">
       <header class="browser-head">
         <div>
           <div class="browser-title" id="browserTitle">Browse presets</div>
           <div class="browser-sub" id="browserSub"></div>
         </div>
-        <div class="browser-search"><span class="ico">⌕</span><input id="browserSearch" type="text" placeholder="search presets…" autocomplete="off"></div>
+        <div class="browser-search"><span class="ico">⌕</span><input id="browserSearch" type="text" aria-label="Search presets" placeholder="search presets…" autocomplete="off"></div>
         <button class="build-btn" id="buildBtn" title="Build your own preset from any sounds">✚ Build a preset</button>
-        <button class="browser-close" id="browserClose">✕</button>
+        <button class="browser-close" id="browserClose" aria-label="Close">✕</button>
       </header>
       <div class="browser-grid" id="browserGrid"></div>
     </div>
   </div>
 
   <!-- swap-a-voice's-sound overlay -->
-  <div class="swapmodal" id="swap" hidden>
+  <div class="swapmodal" id="swap" role="dialog" aria-modal="true" aria-labelledby="swapTitle" hidden>
     <div class="swap-panel">
       <header class="builder-head">
         <div>
           <div class="builder-title" id="swapTitle">Swap sound</div>
           <div class="builder-sub">Pick a new sound — keeps this voice's level, echo and event mappings.</div>
         </div>
-        <button class="builder-close" id="swapClose">✕</button>
+        <button class="builder-close" id="swapClose" aria-label="Close">✕</button>
       </header>
-      <div class="b-search"><span class="ico">⌕</span><input id="swapSearch" type="text" placeholder="search sounds across all presets…" autocomplete="off"></div>
+      <div class="b-search"><span class="ico">⌕</span><input id="swapSearch" type="text" aria-label="Search sounds" placeholder="search sounds across all presets…" autocomplete="off"></div>
       <div class="b-palette" id="swapPalette"></div>
     </div>
   </div>
 
   <!-- preset builder overlay -->
-  <div class="builder" id="builder" hidden>
+  <div class="builder" id="builder" role="dialog" aria-modal="true" aria-labelledby="builderTitle" hidden>
     <div class="builder-panel">
       <header class="builder-head">
         <div>
-          <div class="builder-title">✚ Build a preset</div>
+          <div class="builder-title" id="builderTitle">✚ Build a preset</div>
           <div class="builder-sub">Pick sounds from any of the 40 presets, name it, and make it yours.</div>
         </div>
-        <button class="builder-close" id="builderClose">✕</button>
+        <button class="builder-close" id="builderClose" aria-label="Close">✕</button>
       </header>
       <div class="builder-top">
-        <input id="bName" class="b-name" type="text" placeholder="name your preset…" maxlength="28" autocomplete="off">
+        <input id="bName" class="b-name" type="text" aria-label="Preset name" placeholder="name your preset…" maxlength="28" autocomplete="off">
         <div class="b-start">
           <span class="b-start-lbl">start</span>
           <button class="b-seg on" data-mode="blank">blank</button>
@@ -237,21 +237,21 @@
       </div>
       <div class="builder-sel" id="bSel"></div>
       <div class="builder-body">
-        <div class="b-search"><span class="ico">⌕</span><input id="bSearch" type="text" placeholder="search sounds across all presets…" autocomplete="off"></div>
+        <div class="b-search"><span class="ico">⌕</span><input id="bSearch" type="text" aria-label="Search sounds" placeholder="search sounds across all presets…" autocomplete="off"></div>
         <div class="b-palette" id="bPalette"></div>
       </div>
     </div>
   </div>
 
   <!-- record overlay -->
-  <div class="recmodal" id="recModal" hidden>
+  <div class="recmodal" id="recModal" role="dialog" aria-modal="true" aria-labelledby="recTitle" hidden>
     <div class="rec-panel">
       <header class="rec-head">
         <div>
-          <div class="rec-title">🎙️ Record your session</div>
+          <div class="rec-title" id="recTitle">🎙️ Record your session</div>
           <div class="rec-sub">Capture a clip of Claudio playing, then share how your workflow sounds.</div>
         </div>
-        <button class="rec-close" id="recClose">✕</button>
+        <button class="rec-close" id="recClose" aria-label="Close">✕</button>
       </header>
       <div class="rec-body" id="recBody"></div>
       <div class="rec-list" id="recList"></div>
@@ -259,10 +259,10 @@
   </div>
 
   <!-- first-run welcome / what is this -->
-  <div class="welcome" id="welcome" hidden>
+  <div class="welcome" id="welcome" role="dialog" aria-modal="true" aria-labelledby="welTitle" hidden>
     <div class="wel-panel">
       <div class="wel-orbs"><i></i><i></i><i></i><i></i><i></i></div>
-      <div class="wel-title">Welcome to Claudio <span class="wel-note">🎼</span></div>
+      <div class="wel-title" id="welTitle">Welcome to Claudio <span class="wel-note">🎼</span></div>
       <p class="wel-lead">It turns your Claude Code session into calm, generative music. Every tool call, file edit, and finished reply becomes a soft, in-key sound — so you can <em>hear</em> what your agent is doing without staring at it.</p>
       <div class="wel-cards">
         <div class="wel-card"><div class="wel-ico">🌌</div><div class="wel-h">Watch it play</div><div class="wel-b">Each glowing orb is an instrument — a <b>voice</b> — that blooms when Claude triggers it. Big moments (a finished turn) break across the screen as light. Click any orb to hear it; try the <b>views</b> ✦◍≈❋✸ top-right.</div></div>
@@ -278,49 +278,56 @@
   </div>
 
   <!-- options: appearance + headphone mode + visuals -->
-  <div class="optsmodal" id="optsModal" hidden>
+  <div class="optsmodal" id="optsModal" role="dialog" aria-modal="true" aria-labelledby="optsTitle" hidden>
     <div class="opts-panel">
       <header class="opts-head">
         <div>
-          <div class="opts-title">⚙ Options</div>
+          <div class="opts-title" id="optsTitle">⚙ Options</div>
           <div class="opts-sub">Yours to shape — saved in this browser.</div>
         </div>
-        <button class="opts-close" id="optsClose">✕</button>
+        <button class="opts-close" id="optsClose" aria-label="Close">✕</button>
       </header>
       <div class="opts-body" id="optsBody"></div>
     </div>
   </div>
 
   <!-- help: what can I do here? -->
-  <div class="helpmodal" id="helpModal" hidden>
+  <div class="helpmodal" id="helpModal" role="dialog" aria-modal="true" aria-labelledby="helpTitle" hidden>
     <div class="help-panel">
       <header class="help-head">
         <div>
           <div class="help-title" id="helpTitle">What can I do here?</div>
           <div class="help-sub">Everything Claudio can do — and the matching <code>claudio</code> CLI lives in <code>claudio --help</code>.</div>
         </div>
-        <button class="help-close" id="helpClose">✕</button>
+        <button class="help-close" id="helpClose" aria-label="Close">✕</button>
       </header>
       <div class="help-grid" id="helpGrid"></div>
     </div>
   </div>
 
   <!-- tip / buy-me-a-coffee overlay -->
-  <div class="tipmodal" id="tipModal" hidden>
+  <div class="tipmodal" id="tipModal" role="dialog" aria-modal="true" aria-labelledby="tipTitle" hidden>
     <div class="tip-panel">
       <header class="tip-head">
         <div>
           <div class="tip-title" id="tipTitle">☕ Buy me a coffee</div>
           <div class="tip-sub" id="tipBlurb"></div>
         </div>
-        <button class="tip-close" id="tipClose">✕</button>
+        <button class="tip-close" id="tipClose" aria-label="Close">✕</button>
       </header>
       <div class="tip-grid" id="tipGrid"></div>
       <footer class="tip-foot">On-chain only · no platform, no cut · these are public receiving addresses</footer>
     </div>
   </div>
 
-  <div class="toast" id="toast"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div class="conn-banner" id="connBanner" role="status" aria-live="polite" hidden></div>
+  <div class="fatal" id="fatal" role="alertdialog" aria-modal="true" aria-labelledby="fatalTitle" hidden>
+    <div class="fatal-card">
+      <h2 id="fatalTitle">Can't reach the Claudio server</h2>
+      <p>Is <code>claudio web</code> running? Reload to retry.</p>
+    </div>
+  </div>
   <script src="/static/app.js"></script>
 </body>
 </html>

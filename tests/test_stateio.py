@@ -1,5 +1,8 @@
 import json
+import subprocess
+import sys
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -21,7 +24,6 @@ class StateIOTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=32) as pool:
                 list(pool.map(increment, range(200)))
             self.assertEqual(json.loads(path.read_text()), {"count": 200})
-            self.assertFalse(path.with_name(path.name + ".lock").exists())
             self.assertEqual(list(path.parent.glob(f".{path.name}.*.tmp")), [])
 
     def test_concurrent_saves_never_share_a_temp_file(self):
@@ -38,16 +40,73 @@ class StateIOTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertIn("writer", json.loads(path.read_text()))
 
-    def test_stale_lock_is_reclaimed(self):
+    def test_leftover_lock_file_does_not_block(self):
+        # A lock file left behind by an old/killed process is just a file; the
+        # kernel lock it once carried died with its owner.
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "state.json"
-            lock = path.with_name(path.name + ".lock")
-            lock.write_text("abandoned")
-            old = time.time() - 60
-            __import__("os").utime(lock, (old, old))
-            stateio.save_json(path, {"ok": True})
+            path.with_name(path.name + ".lock").write_text("abandoned")
+            start = time.monotonic()
+            stateio.save_json(path, {"ok": True}, timeout=stateio.HOT_TIMEOUT)
+            self.assertLess(time.monotonic() - start, 0.5)
             self.assertEqual(stateio.load_json(path, {}), {"ok": True})
-            self.assertFalse(lock.exists())
+
+    def test_contenders_stay_mutually_exclusive(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            path.with_name(path.name + ".lock").write_text("orphan")
+            inside, peak = [0], [0]
+            guard = threading.Lock()
+            barrier = threading.Barrier(16)
+            def contend(_):
+                barrier.wait()
+                with stateio.file_lock(path, timeout=10.0):
+                    with guard:
+                        inside[0] += 1
+                        peak[0] = max(peak[0], inside[0])
+                    time.sleep(0.005)
+                    with guard:
+                        inside[0] -= 1
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                list(pool.map(contend, range(16)))
+            self.assertEqual(peak[0], 1)
+
+    def test_held_lock_times_out_quickly(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            with stateio.file_lock(path):
+                start = time.monotonic()
+                with self.assertRaises(stateio.LockTimeout):
+                    with stateio.file_lock(path, timeout=stateio.HOT_TIMEOUT):
+                        pass
+                self.assertLess(time.monotonic() - start, 0.9)
+            # Released on exit: immediately acquirable again.
+            with stateio.file_lock(path, timeout=0):
+                pass
+
+    def test_lock_of_killed_process_is_released_immediately(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "state.json"
+            ready = Path(td) / "ready"
+            holder = subprocess.Popen([sys.executable, "-c", (
+                "import sys, time, pathlib, stateio\n"
+                "with stateio.file_lock(sys.argv[1]):\n"
+                "    pathlib.Path(sys.argv[2]).write_text('1')\n"
+                "    time.sleep(60)\n"), str(path), str(ready)],
+                cwd=str(Path(__file__).resolve().parents[1]))
+            try:
+                deadline = time.monotonic() + 10
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(ready.exists())
+                with self.assertRaises(stateio.LockTimeout):
+                    stateio.save_json(path, {}, timeout=0.1)
+            finally:
+                holder.kill()
+                holder.wait()
+            # The OS drops the dead holder's lock (Windows may take a moment).
+            stateio.save_json(path, {"ok": True}, timeout=2.0)
+            self.assertEqual(stateio.load_json(path, {}), {"ok": True})
 
 
 class RuntimeTransactionTests(unittest.TestCase):
@@ -56,8 +115,12 @@ class RuntimeTransactionTests(unittest.TestCase):
             root = Path(td)
             sessions = root / "sessions.json"
             timeline = root / "timeline"
+            # Serialization, not the bounded hot-path wait, is under test here
+            # (test_held_lock_times_out_quickly covers that): 100 hooks in one
+            # process would otherwise queue past HOT_TIMEOUT on slow CI hosts.
             with mock.patch.object(event, "SESSIONS_FILE", sessions), \
-                 mock.patch.object(event, "TIMELINE", timeline):
+                 mock.patch.object(event, "TIMELINE", timeline), \
+                 mock.patch.object(event, "LOCK_KW", {"timeout": 10.0}):
                 def update(i):
                     event.update_session_record(f"session-{i}", f"/tmp/project-{i}",
                                                 "PostToolUse", "meadow", "default")
@@ -75,14 +138,16 @@ class RuntimeTransactionTests(unittest.TestCase):
             state = Path(td) / "song.json"
             stateio.save_json(state, {"channel": {"demo": "all"}})
             with mock.patch.object(song, "STATE_FILE", state), \
-                 mock.patch.object(song, "load_song", return_value=fake_song):
+                 mock.patch.object(song, "load_song", return_value=fake_song), \
+                 mock.patch.object(stateio, "HOT_TIMEOUT", 10.0):
                 with ThreadPoolExecutor(max_workers=20) as pool:
                     played = list(pool.map(lambda _: song.next_note("demo"), range(50)))
             self.assertEqual(sorted(played), list(range(60, 110)))
             self.assertEqual(stateio.load_json(state, {})["positions"]["demo"], 50)
 
     def test_mioi_allows_only_one_parallel_trigger(self):
-        with tempfile.TemporaryDirectory() as td, mock.patch.object(event, "STATE", Path(td)):
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(event, "STATE", Path(td)), \
+                mock.patch.object(event, "LOCK_KW", {"timeout": 10.0}):
             with ThreadPoolExecutor(max_workers=20) as pool:
                 results = list(pool.map(lambda _: event.check_mioi("meadow", "bell", 60),
                                         range(50)))

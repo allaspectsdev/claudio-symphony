@@ -5,9 +5,22 @@ const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (value) => String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
 }[ch]));
+// Throws on non-2xx (err.status set; network failures have no status) so
+// callers never mistake an {error} body for real data.
+async function apiFetch(u, opts) {
+  const r = await fetch(u, opts);
+  let body = null;
+  try { body = await r.json(); } catch { body = null; }
+  if (!r.ok) {
+    const err = new Error((body && (body.error || body.msg)) || `HTTP ${r.status}`);
+    err.status = r.status; err.body = body;
+    throw err;
+  }
+  return body;
+}
 const api = {
-  get: (u) => fetch(u).then(r => r.json()),
-  post: (u, b) => fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) }).then(r => r.json()),
+  get: (u) => apiFetch(u),
+  post: (u, b) => apiFetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b || {}) }),
 };
 const PALETTE = ['#e8b25c', '#ffd98a', '#8fc0a6', '#8ab6d6', '#e58c66', '#c98c34', '#d9b07a', '#9ec9b0'];
 let STATE = null, DETAIL = null;
@@ -36,13 +49,69 @@ function editPreset() {
 
 /* ---------------- boot ---------------- */
 async function boot() {
-  applyTheme();           // restore per-browser accent before anything paints
-  await loadState();
+  try {
+    applyTheme();           // restore per-browser accent before anything paints
+    await loadState();
+  } catch (e) {
+    console.error('claudio: boot failed', e);
+    showFatal(); return;
+  }
   wireGlobal();
+  wireA11y();
   setFocus({ kind: 'global' });
   startActivityLoop(); startSky();
   setInterval(syncExternal, 4000);
 }
+/* modal focus management: remember what opened a dialog, move focus into it,
+   and hand focus back when it closes — observed via each dialog's `hidden`. */
+function wireA11y() {
+  const back = new Map();
+  const obs = new MutationObserver(recs => recs.forEach(({ target: dlg }) => {
+    if (!dlg.hidden) {
+      if (!back.has(dlg)) back.set(dlg, document.activeElement);
+      setTimeout(() => {               // openers that focus a search box do so at ~50ms
+        if (!dlg.hidden && !dlg.contains(document.activeElement)) {
+          const f = dlg.querySelector('[aria-label="Close"]') || dlg.querySelector('button, input, select');
+          if (f) f.focus();
+        }
+      }, 80);
+    } else {
+      const prev = back.get(dlg); back.delete(dlg);
+      if (prev && prev !== document.body && document.contains(prev) && typeof prev.focus === 'function'
+          && (!document.activeElement || document.activeElement === document.body || dlg.contains(document.activeElement))) {
+        try { prev.focus(); } catch { }
+      }
+    }
+  }));
+  $$('[role="dialog"]').forEach(d => obs.observe(d, { attributes: true, attributeFilter: ['hidden'] }));
+}
+function showFatal() { const f = $('#fatal'); if (f) f.hidden = false; }
+
+/* ---------------- connection health ---------------- */
+// Non-intrusive banner: 403 = our auth cookie is gone (server restarted) →
+// only a reload helps; network/5xx = server away → poll backs off and retries.
+const CONN = { fails: 0 };
+function connBanner(kind) {
+  const b = $('#connBanner'); if (!b) return;
+  if (!kind) { b.hidden = true; b.innerHTML = ''; return; }
+  b.innerHTML = kind === 'auth'
+    ? 'Lost connection to Claudio — <a href="/">reload</a>'
+    : 'Reconnecting…';
+  b.hidden = false;
+}
+function noteConn(err) {
+  if (!err) { if (CONN.fails) { CONN.fails = 0; connBanner(null); } return; }
+  CONN.fails++;
+  if (err.status === 403) connBanner('auth');
+  else if (!err.status || err.status >= 500) connBanner('net');
+}
+window.addEventListener('unhandledrejection', (e) => {
+  const err = e.reason; if (!err || !(err instanceof Error)) return;
+  e.preventDefault();
+  if (err.status === 403) connBanner('auth');
+  else if (err.status) toast(esc(err.message));
+  else connBanner('net');
+});
 async function loadState() {
   STATE = await api.get('/api/state');
   const m = $('#master'); m.value = STATE.master_gain; setFill(m); $('#masterVal').textContent = fmt(STATE.master_gain, 2);
@@ -51,11 +120,24 @@ async function loadState() {
   paintDroneTop();
   renderRail();
 }
-function setPower(on) { const p = $('#power'); p.classList.toggle('on', on); p.classList.toggle('off', !on); p.querySelector('.lbl').textContent = on ? 'ON' : 'OFF'; }
+function setPower(on) { const p = $('#power'); p.classList.toggle('on', on); p.classList.toggle('off', !on); p.setAttribute('aria-pressed', on ? 'true' : 'false'); p.querySelector('.lbl').textContent = on ? 'ON' : 'OFF'; }
+
+/* keyboard access for clickable non-button elements (rail items, preset cards) */
+function makeActivatable(el, fn) {
+  el.tabIndex = 0; el.setAttribute('role', 'button');
+  el.addEventListener('keydown', (e) => {
+    if (e.target !== el) return;               // inner buttons keep their own keys
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(e); }
+  });
+}
 
 /* ---------------- left rail: sessions ---------------- */
 function renderRail() {
-  const wrap = $('#sessList'); wrap.innerHTML = '';
+  const wrap = $('#sessList');
+  // keep keyboard focus on the same rail item across re-renders
+  const fa = document.activeElement, fItem = fa && wrap.contains(fa) ? fa.closest('.srail-item') : null;
+  const refocus = fItem ? (fItem.dataset.session || '__global__') : null;
+  wrap.innerHTML = '';
   const sess = (STATE.sessions || []).filter(s => !s.ended || s.age < 300);
   $('#sessCount').textContent = sess.length ? sess.length + ' open' : '';
 
@@ -66,7 +148,10 @@ function renderRail() {
     <span class="si-name">Global default</span></div>
     <div class="si-preset">${STATE.active} <span class="via">· when no session matches</span></div>`;
   g.onclick = () => setFocus({ kind: 'global' });
+  makeActivatable(g, () => setFocus({ kind: 'global' }));
+  g.setAttribute('aria-pressed', FOCUS.kind === 'global' ? 'true' : 'false');
   wrap.appendChild(g);
+  if (refocus === '__global__') g.focus();
 
   if (!sess.length) {
     const e = document.createElement('div'); e.className = 'rempty'; e.style.padding = '14px 4px';
@@ -85,9 +170,12 @@ function renderRail() {
       ${badges ? `<div class="si-badges">${badges}</div>` : ''}
       ${railTrackHTML(s)}`;
     el.onclick = () => setFocus({ kind: 'session', id: s.id, s });
+    makeActivatable(el, () => setFocus({ kind: 'session', id: s.id, s }));
+    el.setAttribute('aria-pressed', focused ? 'true' : 'false');
     const rb = el.querySelector('.si-replay');
     if (rb) rb.onclick = (e) => { e.stopPropagation(); toggleReplay(s); };
     wrap.appendChild(el);
+    if (refocus === s.id) el.focus();
   });
   paintReplay();
 }
@@ -207,6 +295,7 @@ function renderSessionStrip() {
   chip.innerHTML = `<label>${FOCUS.kind === 'global' ? 'default preset' : 'session preset'}</label>
     <div class="preset-chip" id="presetChip"><span class="pc-name">${esc(DETAIL.name)}</span><span class="pc-ico">⊞ change</span></div>`;
   chip.querySelector('#presetChip').onclick = openBrowser;
+  makeActivatable(chip.querySelector('#presetChip'), openBrowser);
   strip.appendChild(chip);
 
   if (FOCUS.kind === 'session' && FOCUS.s) {
@@ -275,7 +364,7 @@ async function deletePreset(name) {
   await refreshPresetsState();
   if (wasEditing) setFocus({ kind: 'global' });
   renderBrowser($('#browserSearch').value);
-  toast(`deleted <span class="g">${name}</span>`);
+  toast(`deleted <span class="g">${esc(name)}</span>`);
 }
 async function renamePreset(name) {
   const to = prompt(`Rename “${name}” to:`, name);
@@ -286,7 +375,7 @@ async function renamePreset(name) {
   await refreshPresetsState();
   if (wasEditing) setFocus({ kind: 'global' });
   renderBrowser($('#browserSearch').value);
-  toast(`renamed → <span class="g">${r.name}</span>`);
+  toast(`renamed → <span class="g">${esc(r.name)}</span>`);
 }
 
 /* ---------------- sound picker (swap modal, generalized) ---------------- */
@@ -369,7 +458,7 @@ function renderPalette(filter) {
       const picked = bPicks.some(p => p.key === key);
       const chip = document.createElement('div'); chip.className = 'b-chip' + (picked ? ' picked' : ''); chip.dataset.pk = key;
       chip.innerHTML = `<button class="b-play" title="hear it">▶</button><span class="b-vn">${esc(v.voice)}</span><button class="b-add">${picked ? '✓' : '+'}</button>`;
-      chip.querySelector('.b-play').onclick = () => { api.post('/api/voice/play', { preset: grp.preset, voice: v.voice }); toast(`<span class="g">${grp.preset}</span> · ${v.voice}`); };
+      chip.querySelector('.b-play').onclick = () => { api.post('/api/voice/play', { preset: grp.preset, voice: v.voice }); toast(`<span class="g">${esc(grp.preset)}</span> · ${esc(v.voice)}`); };
       chip.querySelector('.b-add').onclick = () => { togglePick(grp.preset, v.voice); };
       row.appendChild(chip);
     });
@@ -426,19 +515,40 @@ function closeTip() { $('#tipModal').hidden = true; }
 /* ---------------- record & share ---------------- */
 const REC_DURATIONS = [[15, '15s'], [30, '30s'], [60, '1m'], [120, '2m'], [300, '5m']];
 let recPick = 30, recDrone = false, recPoll = null;
-function openRec() { $('#recModal').hidden = false; refreshRec(); recPoll = setInterval(refreshRec, 1000); }
+let recBodyActive = null, recListSig = null;     // only re-render what actually changed
+function openRec() {
+  recBodyActive = null; recListSig = null;
+  $('#recModal').hidden = false; refreshRec();
+  if (!recPoll) recPoll = setInterval(refreshRec, 1000);
+}
 function closeRec() { $('#recModal').hidden = true; if (recPoll) { clearInterval(recPoll); recPoll = null; } }
 async function refreshRec() {
   let s; try { s = await api.get('/api/record/status'); } catch (e) { return; }
-  renderRecBody(s); renderRecList(s);
+  // body: rebuild only when recording starts/stops; otherwise just tick the numbers
+  if (!!s.active !== recBodyActive) { recBodyActive = !!s.active; renderRecBody(s); }
+  else if (s.active) updateRecLive(s);
+  // list: rebuild only when the set of clips changes (keeps <audio> playing + focus)
+  const recs = s.recordings || [];
+  if (recSeen >= 0 && recs.length > recSeen && !s.active) toast('✅ clip saved — scroll down to play or download');
+  recSeen = recs.length;
+  const sig = JSON.stringify(recs.map(r => [r.name, r.size]));
+  if (sig !== recListSig) { recListSig = sig; renderRecList(s); }
   const btn = $('#recBtn'), lbl = $('#recBtnLbl');
   btn.classList.toggle('on', !!s.active);
   lbl.textContent = s.active ? `${Math.ceil(s.remaining)}s` : 'Rec';
 }
+function recLivePct(s) { return s.duration ? Math.max(0, Math.min(100, 100 * (1 - s.remaining / s.duration))) : 0; }
+function updateRecLive(s) {
+  const body = $('#recBody');
+  const rem = body.querySelector('.rec-rem'), cap = body.querySelector('.rec-cap'), bar = body.querySelector('.rec-bar span');
+  if (rem) rem.textContent = `${Math.ceil(s.remaining)}s left`;
+  if (cap) cap.textContent = `${s.events || 0} sound${s.events === 1 ? '' : 's'} captured`;
+  if (bar) bar.style.width = recLivePct(s) + '%';
+}
 function renderRecBody(s) {
   const body = $('#recBody');
   if (s.active) {
-    const pct = s.duration ? Math.max(0, Math.min(100, 100 * (1 - s.remaining / s.duration))) : 0;
+    const pct = recLivePct(s);
     body.innerHTML = `
       <div class="rec-live">
         <div class="rec-live-top"><span class="rec-pulse"></span>
@@ -472,9 +582,6 @@ function renderRecBody(s) {
 let recSeen = -1;
 function renderRecList(s) {
   const list = $('#recList'); const recs = s.recordings || [];
-  // toast when a new clip lands
-  if (recSeen >= 0 && recs.length > recSeen && !s.active) toast('✅ clip saved — scroll down to play or download');
-  recSeen = recs.length;
   if (!recs.length) { list.innerHTML = '<div class="rec-empty">No clips yet. Your recordings will show here.</div>'; return; }
   const scores = recs.filter(r => r.kind === 'score');
   // audio clips: one row per take, pair .m4a/.wav by basename
@@ -600,7 +707,7 @@ async function enterJuke() {
   const kit = $('#jukeKit');
   kit.innerHTML = (STATE.presets || []).map(p =>
     `<option value="${esc(p.name)}" ${p.name === JUKE.preset ? 'selected' : ''}>${esc(p.name)}${p.name === 'studio' ? ' · 🥁 drums/bass/synth' : ''}</option>`).join('');
-  kit.onchange = async () => { JUKE.preset = kit.value; await jukeKitChanged(); toast(`kit → <span class="g">${JUKE.preset}</span>`); };
+  kit.onchange = async () => { JUKE.preset = kit.value; await jukeKitChanged(); toast(`kit → <span class="g">${esc(JUKE.preset)}</span>`); };
   await jukeKitChanged();
   refreshJukeStatus();
   if (!JUKE.poll) JUKE.poll = setInterval(refreshJukeStatus, 300);
@@ -701,7 +808,7 @@ function renderJukeMap() {
     const ch = +e.target.dataset.ch, val = e.target.value;
     if (val === '__pick__') {     // browse every preset's sounds for this track
       openSoundPicker(`Pick a sound for ch${ch}`, 'Any sound from any preset — ▶ to hear, use to take it.',
-        (sp, sv) => { JUKE.map[ch] = `voice:${sp}/${sv}`; closeSwap(); renderJukeMap(); toast(`ch${ch} → <span class="g">${sp}/${sv}</span>`); });
+        (sp, sv) => { JUKE.map[ch] = `voice:${sp}/${sv}`; closeSwap(); renderJukeMap(); toast(`ch${ch} → <span class="g">${esc(sp)}/${esc(sv)}</span>`); });
       renderJukeMap();            // snap the select back until they pick
       return;
     }
@@ -712,7 +819,7 @@ function renderJukeMap() {
     const parts = tokenParts(JUKE.map[+b.dataset.ch]);
     if (!parts) { toast('this track is silent'); return; }
     api.post('/api/voice/play', { preset: parts.preset, voice: parts.voice });
-    toast(`♪ <span class="g">${parts.voice}</span>${parts.preset !== JUKE.preset ? ' · ' + parts.preset : ''}`);
+    toast(`♪ <span class="g">${esc(parts.voice)}</span>${parts.preset !== JUKE.preset ? ' · ' + esc(parts.preset) : ''}`);
   });
   $('#jukeSmart').onclick = () => {
     Object.entries(p.smart || {}).forEach(([ch, tok]) => { JUKE.map[+ch] = tok; });
@@ -739,7 +846,7 @@ async function jukeSaveKit() {
   const r = await api.post('/api/preset/create', { name: name.trim(), set_active: false, voices: picks });
   if (!r || !r.ok) { toast(esc((r && r.msg) || 'could not create')); return; }
   try { const s = await api.get('/api/state'); STATE.presets = s.presets; } catch { }
-  toast(`💾 saved <span class="g">${r.name}</span> · ${(r.voices || picks).length} sounds — in Browse presets`);
+  toast(`💾 saved <span class="g">${esc(r.name)}</span> · ${(r.voices || picks).length} sounds — in Browse presets`);
 }
 function jukeMapPayload() {
   // send EVERY channel — silent ones as "__none__" so they override the auto-map
@@ -749,7 +856,7 @@ function jukeMapPayload() {
 async function jukePlay() {
   if (!JUKE.song) { toast('import a MIDI first'); return; }
   const r = await api.post('/api/midiplay/start', { song: JUKE.song, preset: JUKE.preset, tempo: JUKE.tempo, loop: JUKE.loop, mapping: jukeMapPayload() });
-  if (r && r.ok) { toast(`🎹 performing <span class="g">${JUKE.song}</span>`); setTimeout(refreshJukeStatus, 250); }
+  if (r && r.ok) { toast(`🎹 performing <span class="g">${esc(JUKE.song)}</span>`); setTimeout(refreshJukeStatus, 250); }
   else toast(esc((r && r.msg) || 'could not start'));
 }
 async function jukeStop() { await api.post('/api/midiplay/stop', {}); setTimeout(refreshJukeStatus, 200); }
@@ -796,7 +903,7 @@ function jukeImportFile(file) {
     const name = file.name.replace(/\.(mid|midi)$/i, '');
     const r = await api.post('/api/song/import', { name, b64: rd.result });
     if (r && r.ok) {
-      toast(`imported <span class="g">${r.name}</span> · ${r.notes} notes`);
+      toast(`imported <span class="g">${esc(r.name)}</span> · ${esc(r.notes)} notes`);
       const s = await api.get('/api/state'); STATE.music = s.music;     // refresh song list
       JUKE.song = r.name;
       const sel = $('#jukeSong');
@@ -842,6 +949,8 @@ function renderBrowser(filter) {
     c.innerHTML = `<div class="nm">${esc(p.name)}${p.custom ? '<span class="cust-tag">custom</span>' : ''}</div><div class="desc">${esc(p.description || '')}</div>
       <div class="meta"><span class="chip">${p.voice_count} voices</span>${p.has_drone ? '<span class="chip">drone</span>' : ''}${customBtns}<button class="play" title="audition">▶</button></div>`;
     c.onclick = (e) => { if (e.target.closest('.play,.cardx')) return; assignPreset(p.name); };
+    makeActivatable(c, () => assignPreset(p.name));
+    c.setAttribute('aria-label', `${p.name}${p.name === cur ? ' (current)' : ''}`);
       c.querySelector('.play').onclick = (e) => { e.stopPropagation(); api.post('/api/audition', { name: p.name }); toast(`auditioning <span class="g">${esc(p.name)}</span>`); };
     if (p.custom) {
       c.querySelector('.del').onclick = (e) => { e.stopPropagation(); deletePreset(p.name); };
@@ -1295,13 +1404,19 @@ function wireGlobal() {
     e.preventDefault();
     pressT = performance.now(); wasOn = MIC.on;
     if (!MIC.on) startListen();
-    window.addEventListener('pointerup', () => {
+    const release = () => {
+      window.removeEventListener('pointerup', release);
+      window.removeEventListener('pointercancel', release);
       const held = performance.now() - pressT;
       if (held >= MIC_CFG.holdMs) stopListen();   // momentary hold released → off
       else if (wasOn) stopListen();               // quick tap while on → toggle off
       // quick tap while off → leave it latched on
-    }, { once: true });
+    };
+    window.addEventListener('pointerup', release);
+    window.addEventListener('pointercancel', release);
   });
+  // keyboard (Enter/Space → click with detail 0): plain toggle
+  lb.addEventListener('click', (e) => { if (e.detail === 0) { if (MIC.on) stopListen(); else startListen(); } });
   window.addEventListener('beforeunload', () => {
     // best-effort revert so closing the tab mid-jam doesn't strand the key
     if (MIC.on && navigator.sendBeacon) {
@@ -1346,7 +1461,15 @@ function wireGlobal() {
   rs.oninput = () => { $('#reverbScaleVal').textContent = fmt(rs.value,2)+'×'; setFill(rs); };
   rs.onchange = () => { api.post('/api/reverb_scale', { preset: editPreset(), value: +rs.value }); toast('re-rendering reverb space…'); };
 }
+let SYNC_BUSY = false;
 async function syncExternal() {
+  if (SYNC_BUSY || document.hidden) return;
+  SYNC_BUSY = true;
+  try { await syncExternalOnce(); }
+  catch (e) { /* poll() owns the connection banner; just try again next tick */ }
+  finally { SYNC_BUSY = false; }
+}
+async function syncExternalOnce() {
   const s = await api.get('/api/state');
   STATE.presets = s.presets; STATE.rules = s.rules; STATE.music = s.music; STATE.drone = s.drone;
   paintDroneTop();
@@ -1395,15 +1518,38 @@ function updateSparks() {
 }
 
 /* ---------------- live activity ---------------- */
-function startActivityLoop() { poll(); setInterval(poll, 280); }
+// setTimeout chain (never overlaps), paused while the tab is hidden, and backs
+// off exponentially (to ~10s) while the server is unreachable.
+const POLL_MS = 280, POLL_MAX_MS = 10000;
+let POLL_T = 0, POLL_BUSY = false;
+function startActivityLoop() {
+  schedulePoll(0);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) schedulePoll(0); });
+}
+function schedulePoll(ms) { clearTimeout(POLL_T); POLL_T = setTimeout(pollTick, ms); }
+async function pollTick() {
+  if (document.hidden || POLL_BUSY) return;     // visibilitychange / in-flight tick re-arms
+  POLL_BUSY = true;
+  let delay = POLL_MS;
+  try { await poll(); noteConn(null); }
+  catch (e) {
+    noteConn(e);
+    delay = Math.min(POLL_MAX_MS, POLL_MS * 2 ** Math.min(CONN.fails, 6));
+  } finally { POLL_BUSY = false; }
+  if (!document.hidden) schedulePoll(delay);
+}
 async function poll() {
   const P = editPreset(); if (!P) return;
-  let a; try { a = await api.get('/api/activity?name=' + encodeURIComponent(P)); } catch { return; }
+  const a = await api.get('/api/activity?name=' + encodeURIComponent(P));   // throws → backoff
+  if (!a || typeof a !== 'object') return;
+  try { paintActivity(a); } catch (e) { console.error('claudio: activity paint failed', e); }
+}
+function paintActivity(a) {
   const live = a.heartbeat && (a.now - a.heartbeat < 12) && !a.muted;
   $('#pulse').classList.toggle('live', !!live);
   $('#pulseTxt').textContent = a.muted ? 'muted' : (live ? 'listening' : 'idle');
-  Object.entries(a.voices).forEach(([vn, ts]) => { if (ts && ts !== lastVoiceTs[vn]) { if (lastVoiceTs[vn] !== undefined) { flare(vn); MIC.lastFire = performance.now(); } lastVoiceTs[vn] = ts; } paintDot($(`.vrow[data-voice="${cssEsc(vn)}"] .orb`), a.now - ts, true); });
-  Object.entries(a.events).forEach(([en, ts]) => { if (ts && ts !== lastEventTs[en]) { if (lastEventTs[en] !== undefined) eventFX(en); lastEventTs[en] = ts; } paintDot($(`.erow[data-event="${cssEsc(en)}"] .edot`), a.now - ts, false); });
+  Object.entries(a.voices || {}).forEach(([vn, ts]) => { if (ts && ts !== lastVoiceTs[vn]) { if (lastVoiceTs[vn] !== undefined) { flare(vn); MIC.lastFire = performance.now(); } lastVoiceTs[vn] = ts; } paintDot($(`.vrow[data-voice="${cssEsc(vn)}"] .orb`), a.now - ts, true); });
+  Object.entries(a.events || {}).forEach(([en, ts]) => { if (ts && ts !== lastEventTs[en]) { if (lastEventTs[en] !== undefined) eventFX(en); lastEventTs[en] = ts; } paintDot($(`.erow[data-event="${cssEsc(en)}"] .edot`), a.now - ts, false); });
   if (a.counts) { EVT_COUNTS = a.counts; paintFreq(); maybeSortEvents(); }
   // live replay state (button + playhead on the rail sparklines). The playhead
   // itself is animated client-side in animReplay — here we just feed it fresh
@@ -1420,7 +1566,7 @@ async function poll() {
     paintReplay(); animReplayStart();
   }
   // refresh rail when sessions change (not whole stage)
-  if (a.sessions) {
+  if (Array.isArray(a.sessions)) {
     STATE.sessions = a.sessions;
     if (a.active && a.active !== STATE.active) { STATE.active = a.active; $('#npName').textContent = a.active; }
     const sig = JSON.stringify(a.sessions.map(s => [s.id, s.preset, s.pinned, s.scale, s.song, s.ended, Math.floor(s.age / 30)])) + '|' + STATE.active + '|' + FOCUS.kind + (FOCUS.id || '');
@@ -1569,7 +1715,7 @@ function skyHit(e) {
   return (hit && hd < 26 * DPR) ? hit : null;
 }
 // canvas click = hear it + bloom it, nothing else (never scrolls the page)
-sky.addEventListener('click', (e) => { const hit = skyHit(e); if (hit) { api.post('/api/voice/play', { preset: editPreset(), voice: hit.name }); flare(hit.name); toast(`<span class="g">${hit.name}</span> · tune it in the Sounds tab`); } });
+sky.addEventListener('click', (e) => { const hit = skyHit(e); if (hit) { api.post('/api/voice/play', { preset: editPreset(), voice: hit.name }); flare(hit.name); toast(`<span class="g">${esc(hit.name)}</span> · tune it in the Sounds tab`); } });
 let hover = null;
 sky.addEventListener('mousemove', (e) => { hover = skyHit(e); sky.style.cursor = hover ? 'pointer' : 'default'; });
 const VIZ_HINTS = {
@@ -1587,14 +1733,25 @@ function setViz(v) {
   MOTES = []; rings = []; PARTS = [];                  // clean slate between worlds
   nodes.forEach(n => { n.ox = n.oy = n.ovx = n.ovy = 0; n.pulses = []; });
 }
-function startSky() { resizeSky(); setViz(OPTS.viz); requestAnimationFrame(drawSky); }
+// prefers-reduced-motion → redraw at ~4fps instead of 60; hidden tab → stop
+// the loop entirely (visibilitychange restarts it).
+const REDUCED_MOTION = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+let SKY_PENDING = false;
+function scheduleSky() {
+  if (SKY_PENDING || document.hidden) return;
+  SKY_PENDING = true;
+  const go = () => requestAnimationFrame((t) => { SKY_PENDING = false; drawSky(t); });
+  if (REDUCED_MOTION && REDUCED_MOTION.matches) setTimeout(go, 250); else go();
+}
+function startSky() {
+  resizeSky(); setViz(OPTS.viz); scheduleSky();
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleSky(); });
+}
 function drawSky(t) {
   // don't simulate/draw when the constellation can't be seen — the Jukebox
-  // view hides it, and a backgrounded tab doesn't need the n-body sim. Keep
-  // the rAF loop alive so it resumes instantly when shown again.
-  if (document.hidden || document.body.classList.contains('jukebox-view')) {
-    requestAnimationFrame(drawSky); return;
-  }
+  // view hides it. Keep the loop alive so it resumes instantly when shown again.
+  if (document.hidden) return;
+  if (document.body.classList.contains('jukebox-view')) { scheduleSky(); return; }
   ctx.clearRect(0, 0, sky.width, sky.height);
   const breath = 0.5 + 0.5 * Math.sin(t / 2600);
   ENERGY *= 0.994;                                     // slow exhale (~2s half-life)
@@ -1608,7 +1765,7 @@ function drawSky(t) {
     else drawOrbs(t, now, lv, breath);
   }
   drawFX(now);                                         // event-aware overlay, every mode
-  requestAnimationFrame(drawSky);
+  scheduleSky();
 }
 
 /* trail polyline helper — fading line through a particle's recent points */

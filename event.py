@@ -19,30 +19,47 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import song as song_mod  # noqa: E402  (sibling module, must come after sys.path)
-import audio  # noqa: E402  (cross-platform playback backend; same path insert)
-import timeline as timeline_mod  # noqa: E402  (owns the timeline dir + safe_sid; reader must match this writer)
-import stateio  # noqa: E402  (cross-process JSON transactions)
-import config_store  # noqa: E402
-import music  # noqa: E402
-import paths  # noqa: E402
-import preset_store  # noqa: E402
-PRESETS = paths.BUILTIN_PRESETS_DIR
-STATE = paths.STATE_DIR
-LOGS = paths.LOG_DIR
-CONFIG = paths.CONFIG_FILE
-SESSIONS_FILE = paths.SESSIONS_FILE
-RULES_FILE = paths.RULES_FILE
-LOG = LOGS / "event.log"
-TIMELINE = timeline_mod.TIMELINE                      # shared with timeline.py so writer/reader can't drift
+try:
+    import song as song_mod  # noqa: E402  (sibling module, must come after sys.path)
+    import audio  # noqa: E402  (cross-platform playback backend; same path insert)
+    import timeline as timeline_mod  # noqa: E402  (owns the timeline dir + safe_sid; reader must match this writer)
+    import stateio  # noqa: E402  (cross-process JSON transactions)
+    import config_store  # noqa: E402
+    import music  # noqa: E402
+    import paths  # noqa: E402
+    import preset_store  # noqa: E402
+    PRESETS = paths.BUILTIN_PRESETS_DIR
+    STATE = paths.STATE_DIR
+    LOGS = paths.LOG_DIR
+    CONFIG = paths.CONFIG_FILE
+    SESSIONS_FILE = paths.SESSIONS_FILE
+    RULES_FILE = paths.RULES_FILE
+    LOG = LOGS / "event.log"
+    TIMELINE = timeline_mod.TIMELINE                      # shared with timeline.py so writer/reader can't drift
+    STATE.mkdir(parents=True, exist_ok=True); LOGS.mkdir(parents=True, exist_ok=True)
+except Exception:
+    # As a hook, a broken install/unwritable data dir must stay silent: any
+    # traceback would surface in Claude's hook output. Importers still see it.
+    if __name__ != "__main__":
+        raise
+    sys.exit(0)
 TIMELINE_MAX_EVENTS = 20000                          # cap a marathon session's file growth
-STATE.mkdir(exist_ok=True); LOGS.mkdir(exist_ok=True)
+TIMELINE_KEEP_DAYS = 14                              # replayable history; pruned lazily
+TIMELINE_KEEP_FILES = 200
+LOG_MAX_BYTES = 1 << 20                              # rotate event.log -> event.log.1
+# Hook budget is ~1s: wait briefly for hot-path locks, reclaim orphans fast.
+LOCK_KW = {"timeout": stateio.HOT_TIMEOUT, "stale_after": stateio.HOT_STALE_AFTER}
 
 DEFAULT_PRESET = "meadow"
 SESSION_TTL_S = 4 * 3600   # prune sessions idle longer than this
 
 def log(msg):
     try:
+        try:
+            if LOG.stat().st_size > LOG_MAX_BYTES:
+                os.replace(str(LOG), str(LOG.with_name(LOG.name + ".1")))
+        except OSError:
+            pass
         with LOG.open("a") as f:
             f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
     except Exception:
@@ -127,8 +144,10 @@ def ensure_rendered(name):
     sd = preset_store.sample_read_dir(name)
     sdir = preset_state_dir(name)
     if sd.is_dir() and next(sd.rglob("*.wav"), None) is not None:
-        try: (sdir / ".rendered").write_text("1")
-        except Exception: pass
+        marker = sdir / ".rendered"
+        if not marker.exists():
+            try: marker.write_text("1")
+            except Exception: pass
         return True
     # no samples — start one render, guarded so we don't respawn every event.
     # The guard is time-based: if a prior render didn't produce samples within
@@ -136,7 +155,7 @@ def ensure_rendered(name):
     # numpy lands the bed renders without needing a fresh session.
     spawn_mark = sdir / ".rendering"
     try:
-        with stateio.file_lock(spawn_mark, timeout=1.0):
+        with stateio.file_lock(spawn_mark, **LOCK_KW):
             try:
                 fresh = spawn_mark.exists() and (time.time() - float(spawn_mark.read_text() or 0) < 90)
             except Exception:
@@ -159,13 +178,19 @@ def preset_state_dir(name):
 
 # ---------- preset resolution ----------
 
+def _norm_path(p):
+    """Compare paths the same way on every OS: Windows case-folding and
+    backslashes (C:\\Users\\Me) become forward slashes on both sides."""
+    return os.path.normcase(str(p)).replace("\\", "/")
+
 def cwd_rule_match(cwd, pattern):
     """Glob if pattern has wildcards; otherwise prefix match on path components.
     Empty/missing pattern matches any cwd (for time-only or idle-only rules)."""
     if not pattern or pattern == "*":
         return True
+    cwd, pattern = _norm_path(cwd or ""), _norm_path(pattern)
     if any(c in pattern for c in "*?["):
-        return fnmatch.fnmatch(cwd, pattern)
+        return fnmatch.fnmatchcase(cwd, pattern)
     pat = pattern.rstrip("/")
     return cwd == pat or cwd.startswith(pat + "/")
 
@@ -237,14 +262,17 @@ def resolve_preset(session_id, cwd):
 def update_session_record(session_id, cwd, event_name, resolved_preset, source):
     if not session_id:
         return
+    pruned = []
     def mutate(sessions):
         active = sessions.setdefault("active", {})
         cutoff = time.time() - SESSION_TTL_S
+        pruned.clear()
         for sid in list(active.keys()):
             if active[sid].get("last_seen", 0) < cutoff and sid != session_id:
+                # Timelines outlive the session record (replay history); they
+                # are aged out separately by prune_timelines().
                 del active[sid]
-                try: (TIMELINE / f"{timeline_mod.safe_sid(sid)}.ndjson").unlink()
-                except Exception: pass
+                pruned.append(sid)
         rec = active.setdefault(session_id, {})
         now = time.time()
         rec.setdefault("first_seen", now)
@@ -254,8 +282,34 @@ def update_session_record(session_id, cwd, event_name, resolved_preset, source):
         rec["preset_source"] = source
         if event_name == "SessionEnd":
             rec["ended"] = True
-    try: stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
-    except Exception as e: log(f"sessions write: {e}")
+    try: committed = stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate, **LOCK_KW)
+    except Exception as e:
+        log(f"sessions write: {e}")
+        return
+    if pruned:   # rare (once per expired session) — a cheap moment to age timelines
+        prune_timelines(keep=committed.get("active", {}).keys())
+
+def prune_timelines(keep=(), now=None):
+    """Drop session scores older than TIMELINE_KEEP_DAYS and cap the directory
+    at the newest TIMELINE_KEEP_FILES. Sessions still in sessions.json (live or
+    pinned) are never pruned."""
+    now = time.time() if now is None else now
+    keep = {timeline_mod.safe_sid(s) for s in keep}
+    try:
+        files = []
+        for f in TIMELINE.glob("*.ndjson"):
+            if f.stem in keep:
+                continue
+            try: files.append((f.stat().st_mtime, f))
+            except OSError: pass
+    except OSError:
+        return
+    files.sort(key=lambda mf: mf[0], reverse=True)
+    cutoff = now - TIMELINE_KEEP_DAYS * 86400
+    for i, (mtime, f) in enumerate(files):
+        if mtime < cutoff or i >= TIMELINE_KEEP_FILES:
+            try: f.unlink()
+            except OSError: pass
 
 # ---------- sample selection + playback ----------
 
@@ -491,7 +545,7 @@ def melodic_pick(preset_name, voice, voice_dir, song_name=None,
     # The selection and state advance are one transaction.  Without holding
     # the lock across both, simultaneous hooks can choose the same bag entry
     # and overwrite each other's phrase history even with atomic file writes.
-    with stateio.edit_json(state_file, {}, indent=None, newline=False) as state:
+    with stateio.edit_json(state_file, {}, indent=None, newline=False, **LOCK_KW) as state:
         # Tonal-overlay mode for unpitched voices: a noise-burst voice (wood,
         # bird, mokugyo) opts in by setting `tonal_anchor_midi` in preset.json.
         if not pitched and tonal_anchor is not None and scale_pitches:
@@ -581,7 +635,7 @@ def check_mioi(preset_name, voice, mioi_s):
     pressure_file = sd / f"pressure-{voice}.txt"
     # Serialize the timestamp + pressure pair: these are one logical state
     # transition and hooks for the same voice routinely overlap.
-    with stateio.file_lock(last_file, timeout=1.0):
+    with stateio.file_lock(last_file, **LOCK_KW):
         now = time.time()
         try: last = float(last_file.read_text().strip())
         except Exception: last = 0.0
@@ -692,6 +746,8 @@ def trigger(preset_name, preset, voice, song_name=None, quant_override=None,
 # ---------- event mapping ----------
 
 def is_failure(payload):
+    if payload.get("hook_event_name") == "PostToolUseFailure" or payload.get("error"):
+        return True
     resp = payload.get("tool_response")
     if isinstance(resp, dict):
         if resp.get("is_error") or resp.get("error"):
@@ -716,7 +772,9 @@ def resolve_voice(preset, event_name, payload):
     if not spec:
         return None
     if event_name == "PostToolUseFailure" or (event_name == "PostToolUse" and is_failure(payload)):
-        return spec.get("on_failure") or spec.get("default")
+        # An explicit null on_failure means "silence failures" (claudio map
+        # PostToolUse:on_failure -); only a missing key falls back to default.
+        return spec["on_failure"] if "on_failure" in spec else spec.get("default")
     tool = payload.get("tool_name", "")
     by_tool = spec.get("by_tool") or {}
     if tool and tool in by_tool:
@@ -820,9 +878,14 @@ def handle(payload):
             event_effect=event_effect)
 
 def main():
-    raw = sys.stdin.read()
+    raw = ""
     try:
+        # Bytes + explicit UTF-8: the locale codec (cp1252 on Windows) can't
+        # decode Claude's payloads and would raise before we could stay silent.
+        raw = sys.stdin.buffer.read().decode("utf-8", "replace")
         payload = json.loads(raw) if raw.strip() else {}
+        if not isinstance(payload, dict):
+            raise ValueError("payload is not a JSON object")
     except Exception as e:
         log(f"json parse error: {e}; raw={raw[:200]!r}")
         return 0
@@ -831,4 +894,6 @@ def main():
     return 0
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try: main()
+    except Exception: pass      # a hook must never print a traceback
+    sys.exit(0)

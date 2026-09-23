@@ -20,7 +20,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from synth import (SR, A4, freq, t_axis, adsr, soft_clip, lowpass_fft,
+from synth import (SR, freq, t_axis, adsr, lowpass_fft,
                     reverb_stereo, write_wav)
 
 import json as _json
@@ -240,7 +240,6 @@ def voice_choir_bloom(midi):
     f = freq(midi)
     dur = 6.5
     n = int(dur * SR); t = t_axis(dur)
-    rng = np.random.default_rng(int(midi) * 7 + 1)
     # slow breathing vibrato
     vib_slow = 1.0 + 0.0018 * np.sin(2 * np.pi * 0.30 * t)
     sig = np.zeros(n)
@@ -308,7 +307,7 @@ def voice_choral_breath(seed):
     no click; the softest texture in the family."""
     rng = np.random.default_rng(int(seed))
     dur = 1.1
-    n = int(dur * SR); t = t_axis(dur)
+    n = int(dur * SR)
     noise = rng.standard_normal(n)
     # voiced-air band: warm, no hiss top, no rumble bottom
     air = lowpass_fft(noise, 3200.0, order=3) - lowpass_fft(noise, 350.0, order=2)

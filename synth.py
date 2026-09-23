@@ -219,7 +219,7 @@ def voice_pad(chord_midis):
     return sig[:env.size] * env[:sig.size] * 0.45
 
 def voice_drone(loop_seconds=60.0):
-    n = int(loop_seconds * SR); t = t_axis(loop_seconds)
+    t = t_axis(loop_seconds)
     sig = (
         0.7 * np.sin(2*np.pi*F_A1*t) +
         0.55 * np.sin(2*np.pi*F_A2*t) +
@@ -250,11 +250,34 @@ def to_stereo(mono, pan=0.0):
     right_g = math.sin((pan + 1) * math.pi / 4)
     return np.stack([mono * left_g, mono * right_g], axis=1)
 
-def write_wav(path, stereo, target_peak=0.85):
+FADE_IN_S = 0.0004    # ~18 samples: kills the DC-step click on hard attacks
+FADE_OUT_S = 0.005    # 5 ms: no click when a tail is truncated mid-wave
+
+def edge_fades(s, fade_in_s=FADE_IN_S, fade_out_s=FADE_OUT_S):
+    """Short linear fade-in/out so a one-shot starts and ends at zero."""
+    n = s.shape[0]
+    fi = min(n // 2, int(fade_in_s * SR))
+    fo = min(n // 2, int(fade_out_s * SR))
+    if fi <= 0 and fo <= 0:
+        return s
+    s = np.array(s, dtype=np.float64, copy=True)
+    shape = (-1,) + (1,) * (s.ndim - 1)
+    if fi > 0:
+        s[:fi] *= np.linspace(0.0, 1.0, fi, endpoint=False).reshape(shape)
+    if fo > 0:
+        s[-fo:] *= np.linspace(1.0, 0.0, fo).reshape(shape)
+    return s
+
+def write_wav(path, stereo, target_peak=0.85, loop=False):
+    """Normalize + write 16-bit stereo. One-shots get edge fades (no clicks on
+    drum hits / truncated tails); `loop=True` (drone beds) skips them so the
+    clip still wraps seamlessly."""
     s = stereo
     peak = float(np.max(np.abs(s)))
     if peak > 1e-6:
         s = s * min(1.0, target_peak / peak)
+    if not loop:
+        s = edge_fades(s)
     s_int = (s * 32767.0).astype(np.int16)
     with wave.open(str(path), 'wb') as w:
         w.setnchannels(2); w.setsampwidth(2); w.setframerate(SR)
@@ -285,8 +308,11 @@ def gen_all():
     drone = voice_drone(60.0)
     haas = int(0.012 * SR)
     L = drone
-    R = np.concatenate([np.zeros(haas), drone])[:drone.size] * 0.95
-    write_wav(SAMPLES / "drone.wav", np.stack([L, R], axis=1), target_peak=0.7)
+    # circular Haas delay: the R channel's head is the loop's own tail, so the
+    # clip wraps with no silent gap / step on the right side
+    R = np.roll(drone, haas) * 0.95
+    write_wav(SAMPLES / "drone.wav", np.stack([L, R], axis=1), target_peak=0.7,
+              loop=True)
 
     # Reverb taste: plucked melodic voices get LIGHT reverb so they feel
     # present rather than washy. Sustained voices (pad, sparkle) keep more

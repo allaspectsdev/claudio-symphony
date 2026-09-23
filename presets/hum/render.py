@@ -12,7 +12,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from synth import (SR, A4, freq, t_axis, adsr, soft_clip, lowpass_fft,
+from synth import (SR, freq, t_axis, adsr, lowpass_fft,
                     reverb_stereo, write_wav)
 
 # === reverb_scale monkeypatch ===
@@ -66,7 +66,7 @@ def voice_soft_pluck(midi):
 def voice_brush(seed):
     """Soft noise brush — pre-tool tick, near-silent."""
     rng = np.random.default_rng(seed)
-    dur = 0.18; n = int(dur * SR); t = t_axis(dur)
+    dur = 0.18; n = int(dur * SR)
     noise = rng.standard_normal(n)
     bp = lowpass_fft(noise, 4500, order=2) - lowpass_fft(noise, 1200, order=2)
     env = adsr(n, a=0.001, d=0.07, s_level=0.0, r=0.10)

@@ -11,7 +11,7 @@ This will:
   2. Render samples for every preset under presets/.
   3. Write a starter config.json (preset=meadow, master 0.55, drone 0.0)
      unless one already exists.
-  4. Print the next steps (./bin/claudio install / start / tune).
+  4. Print the next steps (bin/claudio install / web / tune).
 
 Re-run any time to regenerate samples (existing samples are overwritten).
 """
@@ -100,16 +100,32 @@ else:
           f"drone_gain={DEFAULT_CONFIG['drone_gain']}")
 
 claudio = HERE / "bin" / ("claudio.cmd" if sys.platform.startswith("win") else "claudio")
+
+def running_as_plugin():
+    """True when this checkout is a Claude Code plugin (its hooks are already wired)."""
+    if os.environ.get("CLAUDE_PLUGIN_ROOT"):
+        return True
+    try:
+        HERE.relative_to((Path.home() / ".claude" / "plugins").resolve())
+        return True
+    except ValueError:
+        return False
+
 print()
 print("─" * 60)
 print(" Done. Next steps:")
 print("─" * 60)
 print()
-print(f"  Add hooks to ~/.claude/settings.json:")
-print(f"    {claudio} install")
+if running_as_plugin():
+    # Adding settings.json hooks on top of the plugin's would play every sound twice.
+    print("  Hooks are provided by the Claude Code plugin — nothing to install.")
+    print("  Start a new Claude Code session to hear it.")
+else:
+    print(f"  Add hooks to ~/.claude/settings.json:")
+    print(f"    {claudio} install")
 print()
-print(f"  Start the drone (cathedral preset has a continuous bed):")
-print(f"    {claudio} start")
+print(f"  Optional drone bed (only some presets have one), e.g.:")
+print(f"    {claudio} preset use cathedral   # starts its drone; `drone off` to stop")
 print()
 print(f"  Open the web console (tune everything, browse presets):")
 print(f"    {claudio} web")
@@ -118,5 +134,5 @@ print(f"  Or the terminal tuner:")
 print(f"    {claudio} tune")
 print()
 print(f"  See all options:")
-print(f"    {claudio}")
+print(f"    {claudio} --help")
 print()

@@ -69,7 +69,8 @@ class ArgvBuilderTests(unittest.TestCase):
 
     def test_mpv(self):
         argv = audio._argv_mpv("mpv")(str(self.wav), 0.42, 1.05946)
-        self.assertIn("--volume=42.0", argv)
+        # mpv volume is cubic: 100 * 0.42 ** (1/3) ~= 74.9
+        self.assertIn("--volume=74.9", argv)
         self.assertIn("--audio-pitch-correction=no", argv)
         self.assertIn("--speed=1.05946", argv)
 
@@ -80,8 +81,13 @@ class ArgvBuilderTests(unittest.TestCase):
                                 "speed", "1.05946"])
 
     def test_paplay_and_pwplay_volume_scale(self):
+        # PulseAudio volume is cubic: pa = 65536 * linear ** (1/3)
         self.assertEqual(audio._argv_paplay("paplay")("/x.wav", 0.42, None),
-                         ["paplay", f"--volume={int(round(0.42 * 65536))}", "/x.wav"])
+                         ["paplay", f"--volume={int(round(65536 * 0.42 ** (1 / 3)))}", "/x.wav"])
+        self.assertEqual(audio._argv_paplay("paplay")("/x.wav", 1.0, None),
+                         ["paplay", "--volume=65536", "/x.wav"])
+        self.assertIn("--volume=100.0", audio._argv_mpv("mpv")("/x.wav", 1.0, None))
+        self.assertIn("--volume=0.0", audio._argv_mpv("mpv")("/x.wav", 0.0, None))
         self.assertEqual(audio._argv_pwplay("pw-play")("/x.wav", 0.42, None),
                          ["pw-play", "--volume=0.4200", "/x.wav"])
 
@@ -251,7 +257,8 @@ class StopTests(unittest.TestCase):
              mock.patch("audio.subprocess.run") as run:
             pf.exists.return_value = False
             audio.stop_all()
-        run.assert_called_once_with(["pkill", "-f", "ffplay"], check=False)
+        # exact process-name match (-x), never a command-line substring (-f)
+        run.assert_called_once_with(["pkill", "-x", "ffplay"], check=False)
 
     def test_no_image_kill_for_generic_player_name(self):
         # sox 'play' / powershell must NEVER be image-killed (would hit unrelated procs).
@@ -262,6 +269,27 @@ class StopTests(unittest.TestCase):
             pf.exists.return_value = False
             audio.stop_all()
         run.assert_not_called()
+
+    def test_tagged_stop_only_terminates_matching_live_players(self):
+        audio._BACKEND = audio.Backend(name="ffplay", kind="argv", image_name="ffplay")
+        audio.IS_WIN = False
+        drone_p, note_p = mock.Mock(), mock.Mock()
+        drone_p.poll.return_value = None
+        note_p.poll.return_value = None
+        audio._LIVE[:] = [(drone_p, "drone"), (note_p, "note")]
+        with mock.patch("audio.PLAYERS_FILE") as pf, \
+             mock.patch("audio.subprocess.run") as run:
+            pf.exists.return_value = False
+            audio.stop_drone()
+        drone_p.terminate.assert_called_once()
+        note_p.terminate.assert_not_called()
+        run.assert_not_called()                  # no image sweep on a tagged stop
+        # stop_all (tag None) terminates everything
+        with mock.patch("audio.PLAYERS_FILE") as pf, \
+             mock.patch("audio.shutil.which", return_value=None):
+            pf.exists.return_value = False
+            audio.stop_all()
+        note_p.terminate.assert_called_once()
 
     def test_stop_drone_purges_stale_other_tag_records(self):
         # H2 regression: stopping one tag must drop STALE other-tag records
@@ -317,6 +345,39 @@ class PreRenderTests(unittest.TestCase):
         a = audio._prerender(self.wav, 1.5)
         b = audio._prerender(self.wav, 1.5)
         self.assertEqual(a, b)
+
+    def test_cache_invalidates_when_source_changes(self):
+        a = audio._prerender(self.wav, 1.5)
+        st = os.stat(self.wav)
+        _write_wav(self.wav, sr=44100, nch=1, nframes=3000)       # "regenerated"
+        os.utime(self.wav, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        b = audio._prerender(self.wav, 1.5)
+        self.assertNotEqual(a, b)
+        with wave.open(b, "rb") as w:
+            self.assertTrue(1900 <= w.getnframes() <= 2100)        # 3000 / 1.5
+
+    def test_baked_gain_quantized_to_half_db(self):
+        a = audio._prerender(self.wav, 1.0, bake_gain=0.500)
+        b = audio._prerender(self.wav, 1.0, bake_gain=0.501)       # < 0.02 dB apart
+        c = audio._prerender(self.wav, 1.0, bake_gain=0.25)        # -6 dB
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, c)
+        q = audio._quantize_gain(0.42)
+        import math
+        self.assertAlmostEqual(20 * math.log10(q) * 2, round(20 * math.log10(q) * 2), places=6)
+        self.assertEqual(audio._quantize_gain(0.0), 0.0)
+
+    def test_prune_keeps_newest(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d, \
+             mock.patch("audio.CACHE_DIR", Path(d)):
+            for i in range(5):
+                f = Path(d) / f"{i}.wav"
+                f.write_bytes(b"x")
+                os.utime(f, (1000 + i, 1000 + i))
+            audio._prune_cache(max_files=2)
+            self.assertEqual(sorted(p.name for p in Path(d).glob("*.wav")),
+                             ["3.wav", "4.wav"])
 
 
 if __name__ == "__main__":

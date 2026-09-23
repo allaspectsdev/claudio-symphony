@@ -43,3 +43,7 @@ tests/_fixture_*.wav
 
 # Local-only growth/strategy working doc
 GROWTH.md
+
+# Packaging artifacts
+build/
+dist/

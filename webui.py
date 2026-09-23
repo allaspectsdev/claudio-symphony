@@ -10,7 +10,7 @@ the live-activity view reads the very markers event.py touches when Claude works
 Run:  python3 webui.py [--port 8788] [--open]
   or: claudio web
 """
-import os, sys, json, time, re, random, secrets, shutil, threading, urllib.parse
+import os, sys, json, math, time, re, random, secrets, shutil, threading, urllib.parse
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
@@ -128,6 +128,14 @@ def save_preset(name, d):
 
 def clamp(x, lo, hi): return max(lo, min(hi, x))
 
+def _float_or(v, default):
+    """float(v) if it is a finite number, else ``default`` (tolerates corrupt config)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return f if math.isfinite(f) else default
+
 ALL_EVENTS = music.MAPPABLE_EVENTS
 
 # ---------- audio (play on the host, like Claudio itself) ----------
@@ -153,8 +161,10 @@ def play_sample(path, gain):
 
 def master_gain(preset_obj):
     cfg = load_config()
+    if not isinstance(cfg, dict): cfg = {}
+    if not isinstance(preset_obj, dict): preset_obj = {}
     m = cfg.get("master_gain")
-    return float(m if m is not None else preset_obj.get("master_gain", 0.5))
+    return _float_or(m if m is not None else preset_obj.get("master_gain", 0.5), 0.5)
 
 def play_voice(preset, voice):
     p = load_preset(preset) or {}
@@ -192,14 +202,21 @@ def preset_card(name):
 SESSION_TTL = 4 * 3600
 
 def sessions_list():
-    d = load_json(STATE / "sessions.json", {}).get("active", {}) or {}
+    raw = load_json(STATE / "sessions.json", {})
+    d = (raw.get("active") if isinstance(raw, dict) else None) or {}
+    if not isinstance(d, dict):
+        return []
     now = time.time()
     out = []
     for sid, rec in d.items():
-        ls = float(rec.get("last_seen", 0) or 0)
+        if not isinstance(rec, dict):
+            continue
+        sid = str(sid)
+        ls = _float_or(rec.get("last_seen", 0) or 0, 0.0)
         if now - ls > SESSION_TTL:
             continue
         cwd = rec.get("cwd", "") or ""
+        if not isinstance(cwd, str): cwd = str(cwd)
         base = cwd.rstrip("/").split("/")[-1] if cwd else ""
         out.append({
             "id": sid, "short": (sid[:6] if sid else "—"),
@@ -232,12 +249,12 @@ def music_state():
     prog = cfg.get("progression") or {}
     return {
         "scales": SCALE_NAMES, "scale_global": cfg.get("scale_override"),
-        "quant": {"enabled": bool(q.get("enabled")), "bpm": float(q.get("bpm", 120.0)), "grid": float(q.get("grid", 0.5))},
+        "quant": {"enabled": bool(q.get("enabled")), "bpm": _float_or(q.get("bpm", 120.0), 120.0), "grid": _float_or(q.get("grid", 0.5), 0.5)},
         "songs": songs, "song_global": gsong,
         "root_offset": off, "root_note": root_note_name(off),
         "chords": {"library": CHORD_NAMES, "presets": PROGRESSION_PRESETS,
                    "prog": {"enabled": bool(prog.get("enabled")), "preset": prog.get("preset"),
-                            "steps": prog.get("steps") or [], "step_s": float(prog.get("step_s", 8) or 8)}},
+                            "steps": prog.get("steps") or [], "step_s": _float_or(prog.get("step_s", 8) or 8, 8.0)}},
     }
 
 # Note names by pitch class; A (pc 9) is Claudio's rendered root (A=432).
@@ -275,13 +292,41 @@ def drone_running():
     except Exception:
         return None
 
+def stop_drone_now():
+    """Stop the drone loop (if running) and silence its in-flight player."""
+    pid = drone_running()
+    if pid:
+        try:
+            audio.terminate_pid(pid)
+            (STATE / "drone.stop").write_text("1")
+        except Exception: pass
+        time.sleep(0.3)
+    audio.stop_drone()        # silence the in-flight player now
+
+def _record_mod():
+    """record.py pulls in numpy; import lazily so the UI still serves without it."""
+    try:
+        import record
+        return record
+    except Exception:
+        return None
+
+def recording_active():
+    rec = _record_mod()
+    if rec is not None and hasattr(rec, "status"):
+        try:
+            return bool(rec.status().get("active"))    # self-heals stale active.json
+        except Exception:
+            pass
+    return REC_ACTIVE.exists()
+
 def drone_state(cfg, active):
     p = load_preset(active) or {}
     return {
         "available": bool(p.get("drone")),
         "running": bool(drone_running()),
         "follow_chords": bool(cfg.get("drone_chords")),
-        "gain": float(cfg.get("drone_gain", p.get("drone_gain", 0.45))),
+        "gain": _float_or(cfg.get("drone_gain", p.get("drone_gain", 0.45)), 0.45),
     }
 
 def full_state():
@@ -291,7 +336,7 @@ def full_state():
         "active": active,
         "muted": bool(cfg.get("muted")),
         "master_gain": master_gain(load_preset(active) or {}),
-        "drone_gain": float(cfg.get("drone_gain", 0.0)),
+        "drone_gain": _float_or(cfg.get("drone_gain", 0.0), 0.0),
         "drone": drone_state(cfg, active),
         "presets": [preset_card(n) for n in list_preset_names()],
         "sessions": sessions_list(),
@@ -567,6 +612,18 @@ class HTTPInputError(Exception):
         self.status = status
         self.message = message
 
+def num(v, lo=None, hi=None, name="value"):
+    """Parse a finite number from request input and clamp it; bad input → 400."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise HTTPInputError(400, f"{name} must be a number")
+    if not math.isfinite(f):
+        raise HTTPInputError(400, f"{name} must be a finite number")
+    if lo is not None and hi is not None:
+        f = clamp(f, lo, hi)
+    return f
+
 def record_status():
     out = {"active": False, "recordings": [], "max": 300, "default": 30}
     if OUT_DIR.exists():
@@ -590,8 +647,27 @@ def record_status():
         pass
     return out
 
+def _parse_range(header, size):
+    """Parse a single ``bytes=a-b`` / ``bytes=a-`` / ``bytes=-n`` range.
+    Returns (start, end) inclusive, or None if unsatisfiable/unsupported."""
+    m = re.fullmatch(r"\s*bytes=(\d*)-(\d*)\s*", header or "")
+    if not m or (not m.group(1) and not m.group(2)) or size <= 0:
+        return None
+    a, b = m.group(1), m.group(2)
+    if not a:                                   # suffix: last n bytes
+        n = int(b)
+        if n <= 0:
+            return None
+        return max(0, size - n), size - 1
+    start = int(a)
+    end = int(b) if b else size - 1
+    if start >= size or end < start:
+        return None
+    return start, min(end, size - 1)
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ClaudioWeb/1.0"
+    timeout = 15    # drop idle/slow sockets instead of pinning a thread forever
     def log_message(self, *a): pass  # quiet
 
     def _common_headers(self):
@@ -667,6 +743,15 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- GET ----
     def do_GET(self):
+        try:
+            return self._do_get()
+        except Exception as e:
+            try:
+                return self._send(500, {"error": str(e)})
+            except Exception:
+                pass    # headers already sent / client gone
+
+    def _do_get(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         path = u.path
@@ -677,8 +762,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/" or path == "/index.html":
             return self._file(WEB / "index.html", set_cookie=True)
         if path.startswith("/static/"):
-            rel = urllib.parse.unquote(path[len("/static/"):])
-            f = safe_child(WEB, rel)
+            f = safe_child(WEB, path[len("/static/"):])    # safe_child unquotes once
             return self._file(f) if f else self._send(404, {"error": "not found"})
         if path == "/api/state":
             return self._send(200, full_state())
@@ -725,11 +809,10 @@ class Handler(BaseHTTPRequestHandler):
                     out[s["id"]] = summ
             return self._send(200, out)
         if path.startswith("/recordings/"):
-            fn = urllib.parse.unquote(path[len("/recordings/"):])
-            f = safe_child(OUT_DIR, fn)
+            f = safe_child(OUT_DIR, path[len("/recordings/"):])    # safe_child unquotes once
             if f is None or not f.exists():
                 return self._send(404, {"error": "not found"})
-            return self._file(f)
+            return self._file(f, ranged=True)
         if path == "/sample":
             preset = (q.get("preset") or [active_preset_name()])[0]
             voice = (q.get("voice") or [""])[0]
@@ -738,7 +821,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._file(random.choice(smp))
         return self._send(404, {"error": "not found"})
 
-    def _file(self, p, set_cookie=False):
+    def _file(self, p, set_cookie=False, ranged=False):
         if p is None:
             return self._send(404, {"error": "not found"})
         p = Path(p)
@@ -746,7 +829,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "not found"})
         ctype = CT.get(p.suffix, "application/octet-stream")
         data = p.read_bytes()
-        self.send_response(200)
+        status, extra = 200, {}
+        rng = self.headers.get("Range") if ranged else None
+        if ranged:
+            extra["Accept-Ranges"] = "bytes"
+        if rng:
+            span = _parse_range(rng, len(data))
+            if span is None:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{len(data)}")
+                self.send_header("Content-Length", "0")
+                self.send_header("Cache-Control", "no-store")
+                self._common_headers()
+                self.end_headers()
+                return
+            start, end = span
+            data = data[start:end + 1]
+            status = 206
+            extra["Content-Range"] = f"bytes {start}-{end}/{p.stat().st_size}"
+        self.send_response(status)
+        for k, v in extra.items():
+            self.send_header(k, v)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
@@ -778,13 +881,19 @@ class Handler(BaseHTTPRequestHandler):
                 cfg = patch_config({"preset": name})
                 return self._send(200, {"ok": True, "active": cfg["preset"]})
             if path == "/api/mute":
-                cfg = patch_config({"muted": bool(b.get("muted"))})
+                muted = bool(b.get("muted"))
+                cfg = patch_config({"muted": muted})
+                if muted:                 # mirror `claudio off`: drone down, tails silenced now
+                    try: stop_drone_now()
+                    except Exception: pass
+                    try: audio.stop_all()
+                    except Exception: pass
                 return self._send(200, {"ok": True, "muted": cfg["muted"]})
             if path == "/api/master":
-                cfg = patch_config({"master_gain": round(clamp(float(b["gain"]), 0, 1), 3)})
+                cfg = patch_config({"master_gain": round(num(b["gain"], 0, 1, "gain"), 3)})
                 return self._send(200, {"ok": True, "master_gain": cfg["master_gain"]})
             if path == "/api/drone":
-                cfg = patch_config({"drone_gain": round(clamp(float(b["gain"]), 0, 1), 3)})
+                cfg = patch_config({"drone_gain": round(num(b["gain"], 0, 1, "gain"), 3)})
                 return self._send(200, {"ok": True, "drone_gain": cfg["drone_gain"]})
             if path == "/api/drone/start":
                 cfg = load_config(); active = cfg.get("preset", "meadow")
@@ -798,14 +907,7 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(0.4)
                 return self._send(200, {"ok": True, "drone": drone_state(load_config(), active)})
             if path == "/api/drone/stop":
-                pid = drone_running()
-                if pid:
-                    try:
-                        audio.terminate_pid(pid)
-                        (STATE / "drone.stop").write_text("1")
-                    except Exception: pass
-                    time.sleep(0.3)
-                audio.stop_drone()        # silence the in-flight player now
+                stop_drone_now()
                 cfg = load_config()
                 return self._send(200, {"ok": True, "drone": drone_state(cfg, cfg.get("preset", "meadow"))})
             if path == "/api/drone/follow":
@@ -849,7 +951,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     if b.get("pc") is not None:
                         # nearest signed distance from A (pc 9), wrapped to [-6,6]
-                        off = ((int(b["pc"]) - 9 + 6) % 12) - 6
+                        off = ((int(num(b["pc"], name="pc")) - 9 + 6) % 12) - 6
                     else:
                         off = root_offset_clamped(b.get("offset"))
                     cfg = patch_config({"root_offset": root_offset_clamped(off)})
@@ -874,7 +976,7 @@ class Handler(BaseHTTPRequestHandler):
                             if len(steps) >= 2:
                                 prog["steps"] = steps; prog["preset"] = "custom"; prog["enabled"] = True
                         if b.get("step_s") is not None:
-                            prog["step_s"] = round(clamp(float(b["step_s"]), 2, 60), 1)
+                            prog["step_s"] = round(num(b["step_s"], 2, 60, "step_s"), 1)
                         if "enabled" in b:
                             prog["enabled"] = bool(b["enabled"]) and bool(prog.get("steps"))
                     cfg["progression"] = prog
@@ -888,8 +990,8 @@ class Handler(BaseHTTPRequestHandler):
                 def mutate_quant(cfg):
                     q = cfg.setdefault("quant", {})
                     if "enabled" in b: q["enabled"] = bool(b["enabled"])
-                    if b.get("bpm") is not None: q["bpm"] = round(clamp(float(b["bpm"]), 30, 300), 1)
-                    if b.get("grid") is not None: q["grid"] = clamp(float(b["grid"]), 0.0625, 4.0)
+                    if b.get("bpm") is not None: q["bpm"] = round(num(b["bpm"], 30, 300, "bpm"), 1)
+                    if b.get("grid") is not None: q["grid"] = num(b["grid"], 0.0625, 4.0, "grid")
                 cfg = update_config(mutate_quant); q = cfg.get("quant", {})
                 return self._send(200, {"ok": True, "quant": q})
             if path == "/api/song":
@@ -933,13 +1035,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "unknown preset"})
                 sd = safe_child(STATE, name)
                 removed = 0
-                if sd.exists():
+                if sd is not None and sd.exists():
                     for f in sd.glob("cnt-*.bin"):
                         try: f.unlink(); removed += 1
                         except Exception: pass
                 return self._send(200, {"ok": True, "removed": removed})
             if path == "/api/record/start":
-                if REC_ACTIVE.exists():
+                if recording_active():
                     return self._send(200, {"ok": False, "msg": "already recording"})
                 try: secs = int(b.get("seconds", 30))
                 except Exception: secs = 30
@@ -949,6 +1051,12 @@ class Handler(BaseHTTPRequestHandler):
                 audio.spawn_python(RECORD_PY, rargs, detached=True)
                 return self._send(200, {"ok": True, "seconds": secs, "drone": bool(b.get("drone"))})
             if path == "/api/record/stop":
+                rec = _record_mod()
+                if rec is not None and hasattr(rec, "request_stop"):
+                    # graceful: sentinel → recorder finalizes the take (terminate fallback inside)
+                    try: stopped = bool(rec.request_stop())
+                    except Exception: stopped = False
+                    return self._send(200, {"ok": True, "stopped": stopped})
                 try:
                     m = json.loads(REC_ACTIVE.read_text())
                     audio.terminate_pid(int(m["pid"]))   # portable; keeps POSIX-isms in audio.py
@@ -977,6 +1085,8 @@ class Handler(BaseHTTPRequestHandler):
                                   else {"ok": False, "msg": "no timeline for that session"})
         except KeyError as e:
             return self._send(400, {"error": f"missing {e}"})
+        except HTTPInputError as e:
+            return self._send(e.status, {"error": e.message})
         except Exception as e:
             return self._send(500, {"error": str(e)})
         return self._send(404, {"error": "not found"})
@@ -992,9 +1102,9 @@ class Handler(BaseHTTPRequestHandler):
         def mutate(p):
             v = p["voices"][b["voice"]]
             if field == "gain":
-                v["gain"] = round(clamp(float(b["value"]), 0, 1), 3)
+                v["gain"] = round(num(b["value"], 0, 1), 3)
             elif field == "mioi":
-                v["mioi"] = round(clamp(float(b["value"]), 0.01, 120), 3)
+                v["mioi"] = round(num(b["value"], 0.01, 120), 3)
             elif bool(b["value"]):
                 v["rate_jitter"] = True
             else:
@@ -1009,9 +1119,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "unknown preset"})
         def mutate(p):
             rv = p["voices"][b["voice"]].setdefault("reverb", {})
-            rv["wet"] = round(clamp(float(b["wet"]), 0, 1), 3)
-            if b.get("decay") is not None: rv["decay"] = round(clamp(float(b["decay"]), 0.1, 8), 2)
-            if b.get("brightness") is not None: rv["brightness"] = round(clamp(float(b["brightness"]), 0, 1), 2)
+            rv["wet"] = round(num(b["wet"], 0, 1, "wet"), 3)
+            if b.get("decay") is not None: rv["decay"] = round(num(b["decay"], 0.1, 8, "decay"), 2)
+            if b.get("brightness") is not None: rv["brightness"] = round(num(b["brightness"], 0, 1, "brightness"), 2)
         preset_store.update(preset, mutate)
         ok, msg = regen_voice(preset, b["voice"])
         return self._send(200, {"ok": True, "regen": ok, "msg": msg})
@@ -1027,9 +1137,9 @@ class Handler(BaseHTTPRequestHandler):
                 v.pop("delay", None)
             else:
                 d = v.setdefault("delay", {})
-                d["ms"] = int(clamp(float(b["ms"]), 40, 2000))
-                d["feedback"] = round(clamp(float(b.get("feedback", d.get("feedback", 0.30))), 0, 0.85), 2)
-                d["count"] = int(clamp(float(b.get("count", d.get("count", 3))), 1, 8))
+                d["ms"] = int(num(b["ms"], 40, 2000, "ms"))
+                d["feedback"] = round(num(b.get("feedback", d.get("feedback", 0.30)), 0, 0.85, "feedback"), 2)
+                d["count"] = int(num(b.get("count", d.get("count", 3)), 1, 8, "count"))
         preset_store.update(preset, mutate)
         return self._send(200, {"ok": True})  # live, no regen
 
@@ -1068,7 +1178,7 @@ class Handler(BaseHTTPRequestHandler):
         if path is None or load_preset(preset) is None:
             return self._send(400, {"error": "unknown preset"})
         preset_store.update(preset,
-                            lambda p: p.update(reverb_scale=round(clamp(float(b["value"]), 0, 2), 3)))
+                            lambda p: p.update(reverb_scale=round(num(b["value"], 0, 2), 3)))
         # full regen in background
         render = preset_path(preset, "render.py")
         if render and render.exists():
@@ -1114,7 +1224,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "time must be HH:MM-HH:MM"})
             rule["time"] = window
         if b.get("idle_after_s"):
-            rule["idle_after_s"] = int(clamp(int(b["idle_after_s"]), 30, 86400))
+            rule["idle_after_s"] = int(num(b["idle_after_s"], 30, 86400, "idle_after_s"))
         key = (rule["pattern"], rule.get("time"), rule.get("idle_after_s"))
         def mutate(d):
             rules = [r for r in d.get("rules", []) if (r.get("pattern"), r.get("time"), r.get("idle_after_s")) != key]
@@ -1158,9 +1268,9 @@ class Handler(BaseHTTPRequestHandler):
         preset = b.get("preset") or active_preset_name()
         pargs = [song, "--preset", str(preset)]
         if b.get("tempo") is not None:
-            pargs += ["--tempo", f"{clamp(float(b['tempo']), 0.25, 4.0):.3f}"]
+            pargs += ["--tempo", f"{num(b['tempo'], 0.25, 4.0, 'tempo'):.3f}"]
         if b.get("bpm") is not None:
-            pargs += ["--bpm", f"{clamp(float(b['bpm']), 20, 400):.2f}"]
+            pargs += ["--bpm", f"{num(b['bpm'], 20, 400, 'bpm'):.2f}"]
         if b.get("loop"):
             pargs += ["--loop"]
         # mapping: {channel: event} → "ch=Event,ch=Event"
@@ -1183,14 +1293,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": False, "msg": "no timeline for that session"})
         midiplay_mod.stop_running()                       # one performance at a time
         preset = b.get("preset") or active_preset_name()
-        tempo = clamp(float(b.get("tempo", 1.0)), 0.25, 4.0)
-        max_gap = clamp(float(b.get("max_gap", 2.5)), 0.2, 30.0)
+        tempo = num(b.get("tempo", 1.0), 0.25, 4.0, "tempo")
+        max_gap = num(b.get("max_gap", 2.5), 0.2, 30.0, "max_gap")
         loop = bool(b.get("loop"))
         # render-to-WAV: arm a recording window sized to the replay before playing
         rendered = False
         if b.get("render") and not loop:
             dur = timeline_mod.replay_duration(score["events"], tempo, max_gap)
-            if not REC_ACTIVE.exists() and dur > 0:
+            if not recording_active() and dur > 0:
                 secs = max(1, min(300, int(dur) + 2))
                 REC_DIR.mkdir(parents=True, exist_ok=True)
                 rargs = ["run", str(secs)] + (["--drone"] if b.get("drone") else [])
