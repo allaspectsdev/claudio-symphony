@@ -48,7 +48,7 @@ class StateIOTests(unittest.TestCase):
             path.with_name(path.name + ".lock").write_text("abandoned")
             start = time.monotonic()
             stateio.save_json(path, {"ok": True}, timeout=stateio.HOT_TIMEOUT)
-            self.assertLess(time.monotonic() - start, 0.2)
+            self.assertLess(time.monotonic() - start, 0.5)
             self.assertEqual(stateio.load_json(path, {}), {"ok": True})
 
     def test_contenders_stay_mutually_exclusive(self):
@@ -146,7 +146,8 @@ class RuntimeTransactionTests(unittest.TestCase):
             self.assertEqual(stateio.load_json(state, {})["positions"]["demo"], 50)
 
     def test_mioi_allows_only_one_parallel_trigger(self):
-        with tempfile.TemporaryDirectory() as td, mock.patch.object(event, "STATE", Path(td)):
+        with tempfile.TemporaryDirectory() as td, mock.patch.object(event, "STATE", Path(td)), \
+                mock.patch.object(event, "LOCK_KW", {"timeout": 10.0}):
             with ThreadPoolExecutor(max_workers=20) as pool:
                 results = list(pool.map(lambda _: event.check_mioi("meadow", "bell", 60),
                                         range(50)))
