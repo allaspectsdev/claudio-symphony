@@ -22,7 +22,9 @@ def defaults():
 
 
 def load(path=None):
-    return stateio.load_json(path or paths.CONFIG_FILE, {})
+    data = stateio.load_json(path or paths.CONFIG_FILE, {})
+    # A hand-edited config.json holding [] or "x" must not crash every caller.
+    return data if isinstance(data, dict) else {}
 
 
 def save(data, path=None):
@@ -31,7 +33,11 @@ def save(data, path=None):
 
 
 def update(mutator, path=None):
-    return stateio.update_json(path or paths.CONFIG_FILE, {}, mutator)
+    def guarded(config):
+        config = config if isinstance(config, dict) else {}
+        replacement = mutator(config)
+        return config if replacement is None else replacement
+    return stateio.update_json(path or paths.CONFIG_FILE, {}, guarded)
 
 
 def patch(values=None, remove=(), path=None):

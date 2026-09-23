@@ -15,6 +15,7 @@ Setup
   install                          Add claudio hooks to ~/.claude/settings.json
   uninstall                        Remove claudio hooks from ~/.claude/settings.json
   status                           Show install + drone + preset state, hooks, sessions, songs, quant
+                                   (also what bare `claudio` runs; `claudio --help` prints this list)
   doctor [--fix]                   Preflight check (python/numpy/player/samples/hooks); --fix renders if needed
   migrate                          Copy legacy checkout data into platform user directories
   start                            Start the drone daemon for the active preset (no-op if no drone)
@@ -35,6 +36,7 @@ Presets
   preset undo [name]               Restore the most recent edit snapshot
   preset export <name> <file>      Export portable, validated preset JSON
   preset import <file> [name]      Import preset JSON into user data
+  preset reverb <0..2>             Set active preset reverb_scale multiplier and regenerate
   audition                         Hear every preset, optionally pick one (safe anytime)
 
 Per-session routing
@@ -47,15 +49,15 @@ Per-session routing
   here <preset>                    Add a cwd rule for the current directory → preset
 
 Directory rules (routing by cwd, optionally time/idle gated)
-  rule list                        Show all cwd-pattern → preset rules
+  rule list                        Show all cwd-pattern → preset rules (alias: rules)
   rule add <pattern> <preset>      Add or replace a rule (glob or path-prefix)
   rule add <pattern> <preset> --time HH:MM-HH:MM    Time-of-day rule (apply only in window)
   rule add <pattern> <preset> --idle-after <secs>   Idle-only rule (apply after N secs idle)
-  rule rm <pattern>                Remove all rules matching pattern (alias: rules)
+  rule rm <pattern>                Remove all rules matching pattern
 
 Live tuning
-  volume <0..1>                    Master gain
-  drone-volume <0..1>              Drone gain (apply requires drone restart)
+  volume [0..1]                    Master gain (no value: print current)
+  drone-volume [0..1]              Drone gain (apply requires drone restart; no value: print current)
   voice <name> gain <0..1>         Per-voice gain
   voice <name> mioi <seconds>      Per-voice minimum-interval rate-limit
   voice <name> reverb <wet> [decay] [bright]|off    Per-voice reverb (regenerates that voice)
@@ -68,7 +70,7 @@ Live tuning
 Event mapping
   map <event>[:<tool>] <voice|none> Map event[/tool] to a voice (none/-/null/silent = silent)
   mute <event>[:<tool>]            Set an event/tool mapping to silent
-  unmute <event>[:<tool>] [voice]  Restore a mapping (defaults to first voice)
+  unmute <event>[:<tool>] [voice]  Restore a mapping (event: first voice; event:tool: clears the override)
   event show                       Show current per-event effects (alias: list, ls)
   event delay <Event> <ms> [fb] [count]   Per-event delay/echo (40-2000ms, 0..0.85 fb, 0..8 count)
   event delay <Event> off          Remove an event's delay
@@ -80,7 +82,6 @@ Key, scales & chords
   scale show                       Print active override + session pins (show/current/status)
   root <note|±semis|off>           Live-transpose the key off A (e.g. `root C`, `root -2`, `root off`)
   chords [pop|list|off|A E F#m D]  Cycle the room through a chord progression (`chords every 8` sets pace)
-  preset reverb <0..2>             Set active preset reverb_scale multiplier and regenerate
 
 MIDI songs (melody source for events)
   song list                        List imported songs (* = global default)
@@ -119,7 +120,7 @@ Record & share
                                    --drone bakes in a faded drone bed (off by default)
   record stop                      Finish the current recording now and save (stop/end/finish)
   record status                    Show recording state + saved clips (status/show)
-  record list                      List saved clips in recordings/ as .wav + .m4a (alias: rec)
+  record list                      List saved clips (.wav + .m4a) in the recordings folder (alias: rec)
 
 Control surfaces
   web [--port N] [--no-open]       Open the browser control panel (default port 8788; alias: ui)
@@ -129,7 +130,7 @@ Control surfaces
 Support
   coffee                           Show on-chain tip addresses (alias: tip, donate)
 """
-import os, sys, json, time, fnmatch
+import os, sys, json, time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -184,15 +185,51 @@ def save_preset(name, d): preset_store.save(name, d)
 
 # ---------- settings.json hook install ----------
 
+class SettingsError(Exception):
+    """~/.claude/settings.json exists but can't be read as a JSON object."""
+
+
+def _err(msg, rc=1):
+    """Print an error to stderr and return an exit code for main()."""
+    print(msg, file=sys.stderr)
+    return rc
+
+
 def load_settings():
-    if SETTINGS.exists(): return json.loads(SETTINGS.read_text())
-    return {}
+    if not SETTINGS.exists(): return {}
+    try:
+        d = json.loads(SETTINGS.read_text())
+    except json.JSONDecodeError as e:
+        raise SettingsError(f"{SETTINGS} is not valid JSON "
+                            f"(line {e.lineno}, column {e.colno}: {e.msg})")
+    except (OSError, UnicodeDecodeError) as e:
+        raise SettingsError(f"could not read {SETTINGS}: {e}")
+    if not isinstance(d, dict) or not isinstance(d.get("hooks", {}), dict):
+        raise SettingsError(f"{SETTINGS} is not a JSON object with a \"hooks\" object")
+    return d
+
+def _settings_error(e):
+    print(f"claudio: {e}", file=sys.stderr)
+    print(f"  Fix it by hand, or restore a copy from {BACKUPS}", file=sys.stderr)
+
+def _load_settings_readonly():
+    """For status/doctor: warn about a broken settings.json and carry on."""
+    try:
+        return load_settings(), None
+    except SettingsError as e:
+        _settings_error(e)
+        return {}, e
 
 def save_settings(d):
-    BACKUPS.mkdir(exist_ok=True)
+    BACKUPS.mkdir(parents=True, exist_ok=True)
     if SETTINGS.exists():
         ts = time.strftime("%Y%m%d-%H%M%S")
-        (BACKUPS / f"settings.json.claudio-{ts}").write_bytes(SETTINGS.read_bytes())
+        dest = BACKUPS / f"settings.json.claudio-{ts}"
+        n = 1
+        while dest.exists():  # several writes in one second must not clobber
+            dest = BACKUPS / f"settings.json.claudio-{ts}-{n}"; n += 1
+        dest.write_bytes(SETTINGS.read_bytes())
+    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS.write_text(json.dumps(d, indent=2) + "\n")
 
 def hook_block_for():
@@ -210,33 +247,63 @@ def hook_block_for():
         }],
     }
 
+def _is_ours(h):
+    return isinstance(h, dict) and bool(h.get(MARKER))
+
 def cmd_install():
-    s = load_settings()
+    try:
+        s = load_settings()
+    except SettingsError as e:
+        _settings_error(e)
+        return _err("install aborted — settings.json was not modified.")
     hooks = s.setdefault("hooks", {})
-    added = []
+    want = hook_block_for()["hooks"][0]
+    added, updated = [], []
     for ev in HOOK_EVENTS:
         existing = hooks.get(ev, [])
-        already = any(any(h.get(MARKER) for h in b.get("hooks", [])) for b in existing)
-        if already: continue
+        if not isinstance(existing, list):
+            _settings_error(SettingsError(f"{SETTINGS}: hooks.{ev} is not a list"))
+            return _err("install aborted — settings.json was not modified.")
+        found = False
+        for b in existing:
+            handlers = b.get("hooks", []) if isinstance(b, dict) else []
+            for i, h in enumerate(handlers):
+                if not _is_ours(h): continue
+                found = True
+                # Refresh stale handlers (old shell-string form, moved checkout,
+                # different interpreter) so they point at this install.
+                if h.get("command") != want["command"] or h.get("args") != want["args"]:
+                    handlers[i] = dict(want)
+                    if ev not in updated: updated.append(ev)
+        if found: continue
         existing.append(hook_block_for())
         hooks[ev] = existing
         added.append(ev)
-    save_settings(s)
+    if added or updated:
+        save_settings(s)
     print(f"installed hooks for: {', '.join(added) if added else '(none — already present)'}")
-    print(f"settings written: {SETTINGS}")
+    if updated:
+        print(f"updated: {', '.join(updated)} (now → {want['command']} {EVENT_PATH})")
+    print(f"settings {'written' if added or updated else 'unchanged'}: {SETTINGS}")
     print()
     print("Note: only NEW Claude Code sessions pick up hook changes (settings.json).")
     print("Preset/voice/mapping/session changes ARE live — no Claude restart needed.")
 
 def cmd_uninstall():
-    s = load_settings()
+    try:
+        s = load_settings()
+    except SettingsError as e:
+        _settings_error(e)
+        return _err("uninstall aborted — settings.json was not modified.")
     hooks = s.get("hooks", {})
     removed = []
     for ev in list(hooks.keys()):
+        if not isinstance(hooks[ev], list): continue
         new_blocks = []
         for block in hooks[ev]:
-            new_handlers = [h for h in block.get("hooks", []) if not h.get(MARKER)]
-            if new_handlers != block.get("hooks", []):
+            handlers = block.get("hooks", []) if isinstance(block, dict) else []
+            new_handlers = [h for h in handlers if not _is_ours(h)]
+            if new_handlers != handlers:
                 if new_handlers:
                     block["hooks"] = new_handlers
                     new_blocks.append(block)
@@ -247,10 +314,13 @@ def cmd_uninstall():
             hooks[ev] = new_blocks
         else:
             del hooks[ev]
+    if not removed:
+        print("removed claudio hooks from: (none) — settings.json unchanged")
+        return
     if not hooks:
         s.pop("hooks", None)
     save_settings(s)
-    print(f"removed claudio hooks from: {', '.join(sorted(set(removed))) if removed else '(none)'}")
+    print(f"removed claudio hooks from: {', '.join(sorted(set(removed)))}")
 
 # ---------- drone control ----------
 
@@ -267,11 +337,12 @@ def cmd_start():
     if pid: print(f"drone already running pid={pid}"); return
     name = active_preset_name()
     preset = load_preset(name)
-    if preset is None: print(f"active preset '{name}' not found"); return
+    if preset is None:
+        return _err(f"active preset '{name}' not found — try: claudio preset use {DEFAULT_PRESET}")
     if not preset.get("drone"):
         print(f"preset '{name}' has no continuous drone — nothing to start")
         return
-    LOGS.mkdir(exist_ok=True)
+    LOGS.mkdir(parents=True, exist_ok=True)
     out = LOGS / "drone.out"
     audio.spawn_python(DRONE_PATH, detached=True, log_file=str(out))
     time.sleep(0.4)
@@ -314,7 +385,7 @@ def cmd_stop():
         audio.stop_drone()          # silence the in-flight drone player now
         print(f"drone stopped pid={pid}")
     except Exception as e:
-        print(f"stop failed: {e}")
+        return _err(f"stop failed: {e}")
 
 # ---------- on/off ----------
 
@@ -363,6 +434,7 @@ def cmd_doctor(args):
         print(f"  {'✓' if good else '✗'} {label}{('  — ' + detail) if detail else ''}")
 
     print("Claudio doctor\n")
+    print(f"  • claudio: {HERE / 'bin' / 'claudio'}")
     # 1. Python
     v = sys.version_info
     line(v >= (3, 9), f"Python {v.major}.{v.minor}", "" if v >= (3, 9) else "need 3.9+")
@@ -381,29 +453,32 @@ def cmd_doctor(args):
              "" if be.kind != "null" else "install ffmpeg (Linux/Win) — see README requirements")
     except Exception as e:
         line(False, "audio player", str(e))
-    # 4. samples for the active preset
+    # 4. active preset exists, and its samples are rendered
     name = active_preset_name()
-    sdir = preset_store.sample_read_dir(name)
-    wavs = list(sdir.rglob("*.wav")) if sdir.exists() else []
-    line(bool(wavs), f"sounds for '{name}'", "" if wavs else f"not rendered yet → claudio regen {name}")
+    wavs = []
+    if load_preset(name) is None:
+        line(False, f"active preset '{name}'", f"not found → claudio preset use {DEFAULT_PRESET}")
+    else:
+        sdir = preset_store.sample_read_dir(name)
+        wavs = list(sdir.rglob("*.wav")) if sdir.exists() else []
+        line(bool(wavs), f"sounds for '{name}'", "" if wavs else f"not rendered yet → claudio regen {name}")
     # 5. config writable
     try:
         cfg = load_config(); save_config(cfg); line(True, "config writable")
     except Exception as e:
         line(False, "config writable", str(e))
     # 6. hooks (manual install only — plugin hooks are managed by Claude Code)
-    s = load_settings(); wired = []
-    for ev, blocks in s.get("hooks", {}).items():
-        for b in blocks:
-            if any(h.get(MARKER) for h in b.get("hooks", [])): wired.append(ev); break
-    if wired:
+    s, bad = _load_settings_readonly(); wired = _wired_events(s)
+    if bad:
+        line(False, "settings.json readable", f"{bad} — restore from {BACKUPS}")
+    elif wired:
         line(True, "hooks wired (manual install)", f"{len(set(wired))} events")
     else:
-        print("  • hooks: none in ~/.claude/settings.json — that's expected if you")
+        print(f"  • hooks: none in {SETTINGS} — that's expected if you")
         print("        installed the plugin (Claude Code manages those). Otherwise run")
-        print("        ./bin/claudio install")
+        print(f"        {HERE / 'bin' / 'claudio'} install")
 
-    if fix and not wavs and have_np:
+    if fix and not wavs and have_np and load_preset(name) is not None:
         render = preset_store.render_path(name)
         if render:
             print(f"\n→ rendering '{name}' …")
@@ -447,15 +522,18 @@ def subprocess_run_render(render_path, preset_name=None):
     except Exception as e:
         print(f"  {e}", file=sys.stderr); return False
 
-def cmd_status():
-    s = load_settings()
-    hooks = s.get("hooks", {})
+def _wired_events(s):
     events = []
-    for ev, blocks in hooks.items():
+    for ev, blocks in s.get("hooks", {}).items():
+        if not isinstance(blocks, list): continue
         for b in blocks:
-            for h in b.get("hooks", []):
-                if h.get(MARKER):
-                    events.append(ev); break
+            if isinstance(b, dict) and any(_is_ours(h) for h in b.get("hooks", [])):
+                events.append(ev); break
+    return events
+
+def cmd_status():
+    s, bad = _load_settings_readonly()
+    events = _wired_events(s)
     cfg = load_config()
     name = cfg.get("preset", "meadow")
     preset = load_preset(name)
@@ -468,7 +546,7 @@ def cmd_status():
         print(f"  drone:         {preset.get('drone') or 'none'}")
         print(f"  voices:        {', '.join(preset.get('voices', {}).keys())}")
     print(f"available:       {', '.join(list_preset_names()) or '(none)'}")
-    print(f"hooks installed: {', '.join(sorted(set(events))) if events else '(none)'}")
+    print(f"hooks installed: {'(settings.json unreadable — see above)' if bad else ', '.join(sorted(set(events))) if events else '(none)'}")
     print(f"drone:           {'running pid='+str(pid) if pid else 'stopped'}")
     print(f"master_gain:     {cfg.get('master_gain', preset.get('master_gain', 0.5) if preset else 0.5)}")
     print(f"drone_gain:      {cfg.get('drone_gain', preset.get('drone_gain', 0.45) if preset else 0.45)}")
@@ -492,6 +570,8 @@ def cmd_status():
     q = song_mod.quant_settings()
     print(f"quant:           {'ON' if q['enabled'] else 'off'}  tempo={q['bpm']} bpm  grid={q['grid']} beats")
     print(f"event log:       {LOGS / 'event.log'}")
+    print()
+    print("run `claudio --help` for all commands")
 
 # ---------- presets ----------
 
@@ -531,7 +611,7 @@ def cmd_preset(args):
         try:
             diff = preset_store.diff_from_default(name)
         except (ValueError, OSError, json.JSONDecodeError) as error:
-            print(f"could not diff preset: {error}"); return 1
+            return _err(f"could not diff preset: {error}")
         print(diff or f"preset '{name}' matches its baseline")
         return
     if args[0] == "history":
@@ -548,41 +628,40 @@ def cmd_preset(args):
         if preset_store.undo(name):
             print(f"preset '{name}' restored to its previous edit")
         else:
-            print(f"no edit history for '{name}'"); return 1
+            return _err(f"no edit history for '{name}'")
         return
     if args[0] == "export":
         if len(args) < 3:
-            print("usage: claudio preset export <name> <file>"); return 1
+            return _err("usage: claudio preset export <name> <file>")
         try:
             destination = preset_store.export_to(args[1], args[2])
             print(f"exported '{args[1]}' → {destination}")
         except (ValueError, OSError) as error:
-            print(f"export failed: {error}"); return 1
+            return _err(f"export failed: {error}")
         return
     if args[0] == "import":
         if len(args) < 2:
-            print("usage: claudio preset import <file> [name]"); return 1
+            return _err("usage: claudio preset import <file> [name]")
         try:
             name = preset_store.import_from(args[1], args[2] if len(args) > 2 else None)
             print(f"imported preset '{name}'")
         except (ValueError, OSError, json.JSONDecodeError) as error:
-            print(f"import failed: {error}"); return 1
+            return _err(f"import failed: {error}")
         return
     if args[0] == "song":
         if len(args) < 3:
-            print("usage: claudio preset song <preset> <song-name|off>"); return
+            return _err("usage: claudio preset song <preset> <song-name|off>")
         pname, song_name = args[1], args[2]
         preset = load_preset(pname)
         if preset is None:
-            print(f"unknown preset '{pname}'"); return
+            return _err(f"unknown preset '{pname}'")
         if song_name in ("off", "none", "-"):
             preset.pop("song", None)
             save_preset(pname, preset)
             print(f"preset '{pname}' song cleared")
             return
         if not song_mod.has_song(song_name):
-            print(f"unknown song '{song_name}'. available: {', '.join(song_mod.list_songs()) or '(none)'}")
-            return
+            return _err(f"unknown song '{song_name}'. available: {', '.join(song_mod.list_songs()) or '(none)'}")
         preset["song"] = song_name
         save_preset(pname, preset)
         print(f"preset '{pname}' song → {song_name}")
@@ -593,33 +672,34 @@ def cmd_preset(args):
     if args[0] == "reverb":
         return cmd_preset_reverb(args[1:])
     if args[0] in ("use", "set", "switch"):
-        if len(args) < 2: print("usage: claudio preset use <name>"); return
+        if len(args) < 2: return _err("usage: claudio preset use <name>")
         name = args[1]
         if name == "default":
             name = DEFAULT_PRESET
         if load_preset(name) is None:
-            print(f"unknown preset '{name}'. available: {', '.join(list_preset_names())}")
-            return
+            return _err(f"unknown preset '{name}'. available: {', '.join(list_preset_names())}")
         cfg = load_config()
         cfg["preset"] = name
-        cfg.pop("master_gain", None)
-        cfg.pop("drone_gain", None)
+        # a new preset brings its own levels; only mention it if the user had tuned them
+        reset = [k for k in ("master_gain", "drone_gain")
+                 if cfg.pop(k, None) not in (None, DEFAULT_CONFIG.get(k))]
         save_config(cfg)
         print(f"active preset → {name}")
+        if reset:
+            print(f"(custom {' and '.join(reset)} reset to the preset's own level)")
         if drone_pid():
             print("(stopping drone — preset changed)"); cmd_stop()
         preset = load_preset(name)
         if preset and preset.get("drone"):
             print("(starting drone for new preset)"); cmd_start()
         return
-    print(f"unknown preset subcommand: {args[0]}")
+    return _err(f"unknown preset subcommand: {args[0]}")
 
 # ---------- reset ----------
 
 def cmd_preset_reset(name):
     if not preset_store.reset(name):
-        print(f"no shipped default for '{name}' (looking for preset.default.json)")
-        return
+        return _err(f"no shipped default for '{name}' (looking for preset.default.json)")
     print(f"preset '{name}' restored from preset.default.json")
 
 
@@ -637,7 +717,7 @@ def cmd_reset(args):
         print(f"  · NOT touch installed hooks, samples, imported songs, or logs")
         print()
         print("Re-run with --yes to confirm: claudio reset --yes")
-        return
+        return 1
     # restore presets
     for name in list_preset_names():
         cmd_preset_reset(name)
@@ -678,7 +758,7 @@ def _resolve_session(target):
     matches = [sid for sid, _ in rows if sid.startswith(target)]
     if len(matches) == 1: return matches[0]
     if len(matches) > 1:
-        print(f"ambiguous prefix '{target}'; matches {len(matches)} sessions")
+        print(f"ambiguous prefix '{target}'; matches {len(matches)} sessions", file=sys.stderr)
     return None
 
 def cmd_sessions():
@@ -707,21 +787,21 @@ def cmd_session(args):
     if sub in ("list", "ls"):
         cmd_sessions(); return
     if sub == "pin":
-        if len(rest) < 2: print("usage: claudio session pin <id|index> <preset>"); return
+        if len(rest) < 2: return _err("usage: claudio session pin <id|index> <preset>")
         sid = _resolve_session(rest[0])
-        if not sid: print(f"no session matches '{rest[0]}'"); return
+        if not sid: return _err(f"no session matches '{rest[0]}'")
         preset = rest[1]
         if load_preset(preset) is None:
-            print(f"unknown preset '{preset}'"); return
+            return _err(f"unknown preset '{preset}'")
         def mutate(d): d.setdefault("active", {}).setdefault(sid, {})["preset_pinned"] = preset
         stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
         print(f"pinned {sid[:8]} → {preset}")
         return
     if sub == "scale":
         if len(rest) < 2:
-            print("usage: claudio session scale <id|index> <scale|off>"); return
+            return _err("usage: claudio session scale <id|index> <scale|off>")
         sid = _resolve_session(rest[0])
-        if not sid: print(f"no session matches '{rest[0]}'"); return
+        if not sid: return _err(f"no session matches '{rest[0]}'")
         target = rest[1]
         if target in ("off", "none", "-"):
             def mutate(d): d.setdefault("active", {}).setdefault(sid, {}).pop("scale_override", None)
@@ -729,17 +809,16 @@ def cmd_session(args):
             print(f"session {sid[:8]} scale cleared")
             return
         if target not in _scale_names():
-            print(f"unknown scale '{target}'. available: {', '.join(_scale_names())}")
-            return
+            return _err(f"unknown scale '{target}'. available: {', '.join(_scale_names())}")
         def mutate(d): d.setdefault("active", {}).setdefault(sid, {})["scale_override"] = target
         stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
         print(f"session {sid[:8]} scale → {target}")
         return
     if sub == "song":
         if len(rest) < 2:
-            print("usage: claudio session song <id|index> <song-name|off>"); return
+            return _err("usage: claudio session song <id|index> <song-name|off>")
         sid = _resolve_session(rest[0])
-        if not sid: print(f"no session matches '{rest[0]}'"); return
+        if not sid: return _err(f"no session matches '{rest[0]}'")
         target = rest[1]
         if target in ("off", "none", "-"):
             def mutate(d): d.setdefault("active", {}).setdefault(sid, {}).pop("song_pinned", None)
@@ -747,29 +826,29 @@ def cmd_session(args):
             print(f"session {sid[:8]} song cleared")
             return
         if not song_mod.has_song(target):
-            print(f"unknown song '{target}'"); return
+            return _err(f"unknown song '{target}'")
         def mutate(d): d.setdefault("active", {}).setdefault(sid, {})["song_pinned"] = target
         stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
         print(f"session {sid[:8]} song → {target}")
         return
     if sub == "unpin":
-        if not rest: print("usage: claudio session unpin <id|index>"); return
+        if not rest: return _err("usage: claudio session unpin <id|index>")
         sid = _resolve_session(rest[0])
-        if not sid: print(f"no session matches '{rest[0]}'"); return
+        if not sid: return _err(f"no session matches '{rest[0]}'")
         def mutate(d):
             if sid in d.get("active", {}): d["active"][sid].pop("preset_pinned", None)
         stateio.update_json(SESSIONS_FILE, {"active": {}}, mutate)
         print(f"unpinned {sid[:8]}")
         return
-    print(f"unknown session subcommand: {sub}")
+    return _err(f"unknown session subcommand: {sub}")
 
 def cmd_here(args):
-    if not args: print("usage: claudio here <preset>"); return
+    if not args: return _err("usage: claudio here <preset>")
     preset = args[0]
     if load_preset(preset) is None:
-        print(f"unknown preset '{preset}'"); return
+        return _err(f"unknown preset '{preset}'")
     cwd = os.environ.get("CLAUDIO_CWD") or os.getcwd()
-    cmd_rule(["add", cwd, preset])
+    return cmd_rule(["add", cwd, preset])
 
 def _format_rule(r):
     parts = [f"  {r.get('pattern','?'):<48} → {r.get('preset','?'):<10}"]
@@ -802,14 +881,15 @@ def cmd_rule(args):
             if a == "--time" and i + 1 < len(rest):
                 time_val = rest[i + 1]; i += 2; continue
             if a in ("--idle-after", "--idle") and i + 1 < len(rest):
-                idle_val = int(rest[i + 1]); i += 2; continue
+                try: idle_val = int(rest[i + 1])
+                except ValueError: return _err(f"--idle-after needs whole seconds (got '{rest[i + 1]}')", 2)
+                i += 2; continue
             positional.append(a); i += 1
         if len(positional) < 2:
-            print("usage: claudio rule add <pattern> <preset> [--time HH:MM-HH:MM] [--idle-after N]")
-            return
+            return _err("usage: claudio rule add <pattern> <preset> [--time HH:MM-HH:MM] [--idle-after N]")
         pattern, preset = positional[0], positional[1]
         if load_preset(preset) is None:
-            print(f"unknown preset '{preset}'"); return
+            return _err(f"unknown preset '{preset}'")
         new_rule = {"pattern": pattern, "preset": preset}
         if time_val:
             try:
@@ -818,11 +898,11 @@ def cmd_rule(args):
                     h, m = s.split(":")
                     int(h); int(m)
             except Exception:
-                print(f"--time must be HH:MM-HH:MM (got '{time_val}')"); return
+                return _err(f"--time must be HH:MM-HH:MM (got '{time_val}')")
             new_rule["time"] = time_val
         if idle_val is not None:
             if idle_val < 30:
-                print(f"--idle-after below 30s is too jumpy; pick a higher value"); return
+                return _err(f"--idle-after below 30s is too jumpy; pick a higher value")
             new_rule["idle_after_s"] = idle_val
         # de-dup by pattern + time + idle (allow multiple rules for same pattern with different conditions)
         key = (new_rule["pattern"], new_rule.get("time"), new_rule.get("idle_after_s"))
@@ -836,7 +916,7 @@ def cmd_rule(args):
         print(_format_rule(new_rule))
         return
     if sub in ("rm", "remove"):
-        if not rest: print("usage: claudio rule rm <pattern>"); return
+        if not rest: return _err("usage: claudio rule rm <pattern>")
         pattern = rest[0]
         removed = {"count": 0}
         def mutate(d):
@@ -846,14 +926,26 @@ def cmd_rule(args):
         stateio.update_json(RULES_FILE, {"rules": []}, mutate)
         print(f"removed {removed['count']} rule(s) matching '{pattern}'")
         return
-    print(f"unknown rule subcommand: {sub}")
+    return _err(f"unknown rule subcommand: {sub}")
 
 # ---------- voice / mapping subcommands ----------
+
+def _float_arg(value, usage):
+    """Parse a numeric CLI argument, or print usage and exit 2."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        f = float("nan")
+    if f != f or f in (float("inf"), float("-inf")):
+        print(f"claudio: expected a number, got '{value}'", file=sys.stderr)
+        print(usage, file=sys.stderr)
+        sys.exit(2)
+    return f
 
 def _require_voice(preset, name):
     voices = preset.get("voices", {})
     if name not in voices:
-        print(f"unknown voice '{name}'. available: {', '.join(voices)}")
+        print(f"unknown voice '{name}'. available: {', '.join(voices)}", file=sys.stderr)
         return None
     return voices[name]
 
@@ -868,13 +960,13 @@ def _regen_voice(pname, vname):
 
 def cmd_voice(args):
     if len(args) < 2:
-        print("usage: claudio voice <name> <gain|mioi|reverb|delay|fx|play> [value]"); return
+        return _err("usage: claudio voice <name> <gain|mioi|reverb|delay|fx|play> [value]")
     name = args[0]; sub = args[1]; rest = args[2:]
     pname = active_preset_name()
     preset = load_preset(pname)
-    if preset is None: print(f"preset {pname} not found"); return
+    if preset is None: return _err(f"preset {pname} not found")
     v = _require_voice(preset, name)
-    if v is None: return
+    if v is None: return 1
     if sub == "reverb":
         # claudio voice <name> reverb <wet> [decay] [brightness] | off
         # baked at render → regenerates just this voice's samples.
@@ -882,11 +974,12 @@ def cmd_voice(args):
         if rest and rest[0] in ("off", "dry", "none", "0"):
             rv["wet"] = 0.0
         elif not rest:
-            print("usage: claudio voice <name> reverb <wet 0..1> [decay s] [brightness 0..1] | off"); return
+            return _err("usage: claudio voice <name> reverb <wet 0..1> [decay s] [brightness 0..1] | off")
         else:
-            rv["wet"] = round(max(0.0, min(1.0, float(rest[0]))), 3)
-            if len(rest) > 1: rv["decay"] = round(max(0.1, min(8.0, float(rest[1]))), 2)
-            if len(rest) > 2: rv["brightness"] = round(max(0.0, min(1.0, float(rest[2]))), 2)
+            u = "usage: claudio voice <name> reverb <wet 0..1> [decay s] [brightness 0..1] | off"
+            rv["wet"] = round(max(0.0, min(1.0, _float_arg(rest[0], u))), 3)
+            if len(rest) > 1: rv["decay"] = round(max(0.1, min(8.0, _float_arg(rest[1], u))), 2)
+            if len(rest) > 2: rv["brightness"] = round(max(0.0, min(1.0, _float_arg(rest[2], u))), 2)
         save_preset(pname, preset)
         print(f"{name}.reverb = {rv}  (regenerating…)")
         _regen_voice(pname, name)
@@ -898,12 +991,13 @@ def cmd_voice(args):
             v.pop("delay", None)
             save_preset(pname, preset)
             print(f"{name}.delay = off"); return
+        u = "usage: claudio voice <name> delay <ms> [feedback 0..0.85] [count 1..8] | off"
         if not rest:
-            print("usage: claudio voice <name> delay <ms> [feedback 0..0.85] [count 1..8] | off"); return
+            return _err(u)
         d = v.setdefault("delay", {})
-        d["ms"] = int(max(40, min(2000, float(rest[0]))))
-        if len(rest) > 1: d["feedback"] = round(max(0.0, min(0.85, float(rest[1]))), 2)
-        if len(rest) > 2: d["count"] = int(max(1, min(8, float(rest[2]))))
+        d["ms"] = int(max(40, min(2000, _float_arg(rest[0], u))))
+        if len(rest) > 1: d["feedback"] = round(max(0.0, min(0.85, _float_arg(rest[1], u))), 2)
+        if len(rest) > 2: d["count"] = int(max(1, min(8, _float_arg(rest[2], u))))
         d.setdefault("feedback", 0.30); d.setdefault("count", 3)
         save_preset(pname, preset)
         print(f"{name}.delay = {d}  (live — no regen)")
@@ -917,14 +1011,14 @@ def cmd_voice(args):
         print(f"{name}: reverb {rtxt}  |  delay {dtxt}")
         return
     if sub == "gain":
-        if not rest: print("usage: claudio voice <name> gain <0..1>"); return
-        v["gain"] = round(max(0.0, min(1.0, float(rest[0]))), 3)
+        if not rest: return _err("usage: claudio voice <name> gain <0..1>")
+        v["gain"] = round(max(0.0, min(1.0, _float_arg(rest[0], "usage: claudio voice <name> gain <0..1>"))), 3)
         save_preset(pname, preset)
         print(f"{name}.gain = {v['gain']}")
         return
     if sub == "mioi":
-        if not rest: print("usage: claudio voice <name> mioi <seconds>"); return
-        v["mioi"] = round(max(0.01, min(120.0, float(rest[0]))), 3)
+        if not rest: return _err("usage: claudio voice <name> mioi <seconds>")
+        v["mioi"] = round(max(0.01, min(120.0, _float_arg(rest[0], "usage: claudio voice <name> mioi <seconds>"))), 3)
         save_preset(pname, preset)
         print(f"{name}.mioi = {v['mioi']}s")
         return
@@ -934,7 +1028,7 @@ def cmd_voice(args):
         import random
         d = preset_store.sample_asset(pname, v.get("dir", name))
         samples = sorted(p for p in d.iterdir() if p.suffix == ".wav") if d.exists() else []
-        if not samples: print(f"no samples in {d}"); return
+        if not samples: return _err(f"no samples in {d} — try: claudio regen {pname}")
         cfg = load_config()
         master = float(cfg.get("master_gain", preset.get("master_gain", 0.5)))
         gain = max(0.0, min(1.0, v.get("gain", 0.5) * master))
@@ -942,7 +1036,7 @@ def cmd_voice(args):
         audio.play_simple(sample, gain)
         print(f"playing {name} → {sample.name} @ v={gain:.2f}")
         return
-    print(f"unknown voice subcommand: {sub}")
+    return _err(f"unknown voice subcommand: {sub}")
 
 def _parse_event_key(token):
     """ 'PostToolUse' → ('PostToolUse', 'default')
@@ -950,24 +1044,36 @@ def _parse_event_key(token):
         'PostToolUse:on_failure' → ('PostToolUse', 'on_failure') """
     if ":" in token:
         ev, key = token.split(":", 1)
-        return ev, key
-    return token, "default"
+    else:
+        ev, key = token, "default"
+    if ev == "PostToolUseFailure" and key == "default":
+        # failures are mapped via PostToolUse's on_failure slot (see event.py)
+        ev, key = "PostToolUse", "on_failure"
+    return ev, key
+
+_CLEAR = object()   # _set_mapping sentinel: drop a by_tool override entirely
 
 def _set_mapping(ev, key, voice_or_none):
+    """voice_or_none: a voice name, None (explicitly silent — stored as null so
+    a by_tool entry keeps overriding the event default), or _CLEAR (remove the
+    by_tool override so the tool falls back to the event default)."""
+    if ev not in HOOK_EVENTS:
+        print(f"unknown event '{ev}'. events: {', '.join(HOOK_EVENTS)}", file=sys.stderr)
+        return False
     pname = active_preset_name()
     preset = load_preset(pname)
-    if preset is None: print(f"preset {pname} not found"); return False
-    if voice_or_none is not None and voice_or_none not in preset.get("voices", {}):
-        print(f"unknown voice '{voice_or_none}'. available: {', '.join(preset.get('voices', {}))}")
+    if preset is None:
+        print(f"preset {pname} not found", file=sys.stderr); return False
+    if voice_or_none not in (None, _CLEAR) and voice_or_none not in preset.get("voices", {}):
+        print(f"unknown voice '{voice_or_none}'. available: {', '.join(preset.get('voices', {}))}",
+              file=sys.stderr)
         return False
     spec = preset.setdefault("events", {}).setdefault(ev, {})
-    if key == "default":
-        spec["default"] = voice_or_none
-    elif key == "on_failure":
-        spec["on_failure"] = voice_or_none
+    if key in ("default", "on_failure"):
+        spec[key] = None if voice_or_none is _CLEAR else voice_or_none
     else:
         bt = spec.setdefault("by_tool", {})
-        if voice_or_none is None:
+        if voice_or_none is _CLEAR:
             bt.pop(key, None)
         else:
             bt[key] = voice_or_none
@@ -975,42 +1081,58 @@ def _set_mapping(ev, key, voice_or_none):
     return True
 
 def cmd_map(args):
-    if len(args) < 2: print("usage: claudio map <event>[:<tool>] <voice|none>"); return
+    if len(args) < 2: return _err("usage: claudio map <event>[:<tool>] <voice|none>")
     ev, key = _parse_event_key(args[0])
     voice = args[1]
     if voice in ("-", "none", "null", "silent"): voice = None
-    if _set_mapping(ev, key, voice):
-        print(f"map {ev}/{key} → {voice if voice is not None else '(silent)'}")
+    if not _set_mapping(ev, key, voice): return 1
+    print(f"map {ev}/{key} → {voice if voice is not None else '(silent)'}")
 
 def cmd_mute(args):
-    if not args: print("usage: claudio mute <event>[:<tool>]"); return
+    if not args: return _err("usage: claudio mute <event>[:<tool>]")
     ev, key = _parse_event_key(args[0])
-    if _set_mapping(ev, key, None):
-        print(f"muted {ev}/{key}")
+    if not _set_mapping(ev, key, None): return 1
+    print(f"muted {ev}/{key}")
 
 def cmd_unmute(args):
-    if not args: print("usage: claudio unmute <event>[:<tool>] [voice]"); return
+    if not args: return _err("usage: claudio unmute <event>[:<tool>] [voice]")
     ev, key = _parse_event_key(args[0])
+    if len(args) < 2 and key not in ("default", "on_failure"):
+        # event:tool with no voice → drop the override; the tool follows the event default
+        if not _set_mapping(ev, key, _CLEAR): return 1
+        print(f"unmuted {ev}/{key} → (event default)")
+        return
     pname = active_preset_name()
     preset = load_preset(pname)
-    if preset is None: return
+    if preset is None: return _err(f"preset {pname} not found")
     voices = list(preset.get("voices", {}).keys())
-    if not voices: print("preset has no voices"); return
+    if not voices: return _err("preset has no voices")
     voice = args[1] if len(args) > 1 else voices[0]
-    if _set_mapping(ev, key, voice):
-        print(f"unmuted {ev}/{key} → {voice}")
+    if not _set_mapping(ev, key, voice): return 1
+    print(f"unmuted {ev}/{key} → {voice}")
 
 # ---------- gain ----------
 
-def cmd_volume(v):
+def _current_gain(key, fallback):
     cfg = load_config()
-    cfg["master_gain"] = max(0.0, min(1.0, float(v)))
+    if key in cfg: return cfg[key]
+    return (load_preset(active_preset_name()) or {}).get(key, fallback)
+
+def cmd_volume(v=None):
+    if v is None:
+        print(f"master_gain = {_current_gain('master_gain', 0.5)}"); return
+    g = _float_arg(v, "usage: claudio volume <0..1>")
+    cfg = load_config()
+    cfg["master_gain"] = max(0.0, min(1.0, g))
     save_config(cfg)
     print(f"master_gain = {cfg['master_gain']}")
 
-def cmd_drone_volume(v):
+def cmd_drone_volume(v=None):
+    if v is None:
+        print(f"drone_gain = {_current_gain('drone_gain', 0.45)}"); return
+    g = _float_arg(v, "usage: claudio drone-volume <0..1>")
     cfg = load_config()
-    cfg["drone_gain"] = max(0.0, min(1.0, float(v)))
+    cfg["drone_gain"] = max(0.0, min(1.0, g))
     save_config(cfg)
     print(f"drone_gain = {cfg['drone_gain']} (restart drone to apply)")
 
@@ -1029,7 +1151,7 @@ def cmd_regen(args):
         print(f"cathedral has no render.py; samples already rendered at "
               f"{preset_store.sample_read_dir('cathedral')}")
     else:
-        print(f"no renderer for preset '{name}'")
+        return _err(f"no renderer for preset '{name}'. available: {', '.join(list_preset_names())}")
 
 # ---------- test demo ----------
 
@@ -1046,7 +1168,7 @@ def clear_mioi(preset_name):
 def cmd_test(voice=None):
     name = active_preset_name()
     preset = load_preset(name)
-    if preset is None: print(f"preset '{name}' not found"); return
+    if preset is None: return _err(f"preset '{name}' not found")
     clear_mioi(name)
     events = preset.get("events", {})
     sequence = []
@@ -1071,7 +1193,7 @@ def cmd_test(voice=None):
         sequence = [p for p in sequence
                     if mod.resolve_voice(preset, p["hook_event_name"], p) == voice]
         if not sequence:
-            print(f"no events in preset '{name}' map to voice '{voice}'"); return
+            return _err(f"no events in preset '{name}' map to voice '{voice}'")
 
     for p in sequence:
         ev = p["hook_event_name"]; tool = p.get("tool_name", "")
@@ -1116,10 +1238,11 @@ def cmd_replay(args):
         midiplay_mod.stop_running(); print("replay stopped"); return
     if args and args[0] == "export":
         if len(args) < 2:
-            print("usage: claudio replay export <session_id|latest> [label]"); return
+            return _err("usage: claudio replay export <session_id|latest> [label]")
         sid = _timeline_ids()[0] if args[1] == "latest" and _timeline_ids() else args[1]
         base = timeline_mod.export_score(sid, args[2] if len(args) > 2 else None)
-        print(f"exported recordings/{base}.score.json (tiny + shareable)" if base else "no timeline for that session")
+        if not base: return _err("no timeline for that session")
+        print(f"exported {paths.RECORDINGS_DIR / (base + '.score.json')} (tiny + shareable)")
         return
     if not args or args[0] in ("list", "ls"):
         ids = _timeline_ids()
@@ -1139,21 +1262,23 @@ def cmd_replay(args):
     rest = args[1:]
     if sid == "latest":
         ids = _timeline_ids()
-        if not ids: print("(no sessions captured yet)"); return
+        if not ids: return _err("(no sessions captured yet)")
         sid = ids[0]
     preset = None; tempo = 1.0; loop = False; render = False; max_gap = 2.5
     i = 0
     while i < len(rest):
         a = rest[i]
         if a == "--preset" and i + 1 < len(rest): preset = rest[i + 1]; i += 2
-        elif a == "--tempo" and i + 1 < len(rest): tempo = float(rest[i + 1]); i += 2
-        elif a == "--max-gap" and i + 1 < len(rest): max_gap = float(rest[i + 1]); i += 2
+        elif a == "--tempo" and i + 1 < len(rest):
+            tempo = max(0.25, min(4.0, _float_arg(rest[i + 1], "usage: claudio replay <id> --tempo <0.25..4>"))); i += 2
+        elif a == "--max-gap" and i + 1 < len(rest):
+            max_gap = max(0.0, _float_arg(rest[i + 1], "usage: claudio replay <id> --max-gap <seconds>")); i += 2
         elif a == "--loop": loop = True; i += 1
         elif a in ("--render", "--wav"): render = True; i += 1
         else: i += 1
     s = timeline_mod.read_session(sid)
     if not s or not s.get("events"):
-        print(f"no timeline for session '{sid}'. try: claudio replay list"); return
+        return _err(f"no timeline for session '{sid}'. try: claudio replay list")
     preset = preset or active_preset_name()
     dur = timeline_mod.replay_duration(s["events"], tempo, max_gap)
     print(f"▶ replaying session {sid[:12]} through '{preset}'  "
@@ -1162,7 +1287,7 @@ def cmd_replay(args):
         secs = max(1, min(300, int(dur) + 2))
         (STATE / "recording").mkdir(parents=True, exist_ok=True)
         audio.spawn_python(str(HERE / "record.py"), ["run", str(secs)], detached=True)  # absolute: claudio runs from any cwd
-        print(f"  ● rendering to a WAV in recordings/ ({secs}s)")
+        print(f"  ● rendering to a WAV in {paths.RECORDINGS_DIR} ({secs}s)")
         time.sleep(0.3)
     print("  (Ctrl-C to stop)\n")
     midiplay_mod.run_score(sid, preset, tempo=tempo, loop=loop, max_gap=max_gap)
@@ -1200,20 +1325,20 @@ def cmd_play(args):
     while i < len(rest):
         a = rest[i]
         if a == "--preset" and i + 1 < len(rest): preset = rest[i + 1]; i += 2
-        elif a == "--tempo" and i + 1 < len(rest): tempo = float(rest[i + 1]); i += 2
-        elif a == "--bpm" and i + 1 < len(rest): bpm = float(rest[i + 1]); i += 2
+        elif a == "--tempo" and i + 1 < len(rest):
+            tempo = max(0.25, min(4.0, _float_arg(rest[i + 1], "usage: claudio play <name> --tempo <0.25..4>"))); i += 2
+        elif a == "--bpm" and i + 1 < len(rest):
+            bpm = max(1.0, _float_arg(rest[i + 1], "usage: claudio play <name> --bpm <bpm>")); i += 2
         elif a == "--map" and i + 1 < len(rest): mapping = midiplay_mod._parse_map_arg(rest[i + 1]); i += 2
         elif a == "--loop": loop = True; i += 1
         else: i += 1
 
     if not song_mod.has_song(song_name):
-        print(f"unknown song '{song_name}'. available: {', '.join(song_mod.list_songs()) or '(none)'}")
-        return
+        return _err(f"unknown song '{song_name}'. available: {', '.join(song_mod.list_songs()) or '(none)'}")
     preset = preset or active_preset_name()
     p = midiplay_mod.plan(song_name, preset, mapping)
     if not p or not p.get("channels"):
-        print("nothing to play (no mappable channels / voices in this preset)")
-        return
+        return _err("nothing to play (no mappable channels / voices in this preset)")
     print(f"♪ performing '{song_name}' through '{preset}'  "
           f"({p['total_notes']} notes · {p['duration']:.0f}s · bpm {p['bpm']*tempo:.0f})")
     print("  track → event → voice:")
@@ -1242,23 +1367,23 @@ def cmd_song(args):
     sub = args[0]; rest = args[1:]
     if sub == "import":
         if not rest:
-            print("usage: claudio song import <file.mid> [name]"); return
+            return _err("usage: claudio song import <file.mid> [name]")
         try:
             name, parsed = song_mod.import_midi_file(rest[0], rest[1] if len(rest) > 1 else None)
         except Exception as e:
-            print(f"import failed: {e}"); return
+            return _err(f"import failed: {e}")
         lead = song_mod.lead_channel(parsed)
         print(f"imported '{name}': {len(parsed['notes'])} notes  bpm={parsed['bpm']}  lead=ch{lead}")
         return
     if sub in ("import-dir", "importdir"):
         if not rest:
-            print("usage: claudio song import-dir <folder>"); return
+            return _err("usage: claudio song import-dir <folder>")
         folder = Path(rest[0]).expanduser()
         if not folder.is_dir():
-            print(f"not a folder: {folder}"); return
+            return _err(f"not a folder: {folder}")
         files = sorted(p for p in folder.iterdir() if p.suffix.lower() == ".mid")
         if not files:
-            print(f"no .mid files in {folder}"); return
+            return _err(f"no .mid files in {folder}")
         for f in files:
             try:
                 name, parsed = song_mod.import_midi_file(f)
@@ -1269,10 +1394,9 @@ def cmd_song(args):
         return
     if sub == "use":
         if not rest:
-            print("usage: claudio song use <name>"); return
+            return _err("usage: claudio song use <name>")
         if not song_mod.set_global(rest[0]):
-            print(f"unknown song '{rest[0]}'. available: {', '.join(song_mod.list_songs()) or '(none)'}")
-            return
+            return _err(f"unknown song '{rest[0]}'. available: {', '.join(song_mod.list_songs()) or '(none)'}")
         print(f"global song → {rest[0]} (events cycle through its notes)")
         return
     if sub in ("off", "stop", "disable"):
@@ -1289,7 +1413,6 @@ def cmd_song(args):
             print(f"  channel:      {_channel_label(s, g)}")
             print(f"  bpm (file):   {s.get('bpm')}")
         # preset overrides
-        from importlib import import_module
         for name in list_preset_names():
             preset = load_preset(name)
             ps = (preset or {}).get("song")
@@ -1305,16 +1428,16 @@ def cmd_song(args):
     if sub == "reset":
         target = rest[0] if rest else song_mod.global_song()
         if not target:
-            print("usage: claudio song reset <name> (no global song set)"); return
+            return _err("usage: claudio song reset <name> (no global song set)")
         song_mod.reset_position(target)
         print(f"song '{target}' position → 0")
         return
     if sub == "channel":
         if len(rest) < 2:
-            print("usage: claudio song channel <name> <lead|all|N>"); return
+            return _err("usage: claudio song channel <name> <lead|all|N>")
         name, ch_str = rest[0], rest[1]
         if not song_mod.has_song(name):
-            print(f"unknown song '{name}'"); return
+            return _err(f"unknown song '{name}'")
         if ch_str in ("lead", "auto"):
             song_mod.set_channel(name, "lead")
         elif ch_str == "all":
@@ -1323,17 +1446,17 @@ def cmd_song(args):
             try:
                 song_mod.set_channel(name, int(ch_str))
             except ValueError:
-                print("channel must be 'lead', 'all', or an integer 0-15"); return
+                return _err("channel must be 'lead', 'all', or an integer 0-15")
         s = song_mod.load_song(name)
         print(f"{name}.channel = {_channel_label(s, name)}  ({len(song_mod.notes_for(name))} notes after filter)")
         return
     if sub == "info":
         if not rest:
-            print("usage: claudio song info <name>"); return
+            return _err("usage: claudio song info <name>")
         name = rest[0]
         s = song_mod.load_song(name)
         if not s:
-            print(f"unknown song '{name}'"); return
+            return _err(f"unknown song '{name}'")
         lead = song_mod.lead_channel(s)
         print(f"{name}: {len(s.get('notes') or [])} notes  bpm={s.get('bpm')}  ppq={s.get('ppq')}")
         print(f"  selected channel: {_channel_label(s, name)}")
@@ -1343,7 +1466,7 @@ def cmd_song(args):
             marker = " ← lead" if ch == lead else ""
             print(f"    ch{ch:>2}  {ct:>5} notes  median midi={med}{marker}")
         return
-    print(f"unknown song subcommand: {sub}")
+    return _err(f"unknown song subcommand: {sub}")
 
 
 def _print_quant():
@@ -1363,7 +1486,7 @@ def cmd_quant(args):
     if sub == "toggle":
         cur = song_mod.quant_settings()["enabled"]
         song_mod.set_quant(enabled=not cur); _print_quant(); return
-    print(f"unknown quant subcommand: {sub}")
+    return _err(f"unknown quant subcommand: {sub}")
 
 
 def cmd_tempo(args):
@@ -1372,7 +1495,7 @@ def cmd_tempo(args):
     try:
         bpm = float(args[0])
     except ValueError:
-        print("usage: claudio tempo <bpm>"); return
+        return _err("usage: claudio tempo <bpm>", 2)
     song_mod.set_quant(bpm=bpm)
     _print_quant()
 
@@ -1393,8 +1516,7 @@ def cmd_grid(args):
     else:
         try: grid = float(raw)
         except ValueError:
-            print("usage: claudio grid <0.25|0.5|1.0|16th|8th|quarter|...>")
-            return
+            return _err("usage: claudio grid <0.25|0.5|1.0|16th|8th|quarter|...>", 2)
     song_mod.set_quant(grid=grid)
     _print_quant()
 
@@ -1432,12 +1554,11 @@ def cmd_scale(args):
         # `claudio scale use <name>` or shorthand `claudio scale <name>`
         name = args[1] if sub == "use" and len(args) > 1 else sub
         if name not in _scale_names():
-            print(f"unknown scale '{name}'. available: {', '.join(_scale_names())}")
-            return
+            return _err(f"unknown scale '{name}'. available: {', '.join(_scale_names())}")
         cfg = load_config(); cfg["scale_override"] = name; save_config(cfg)
         print(f"global scale → {name}")
         return
-    print(f"unknown scale subcommand: {sub}")
+    return _err(f"unknown scale '{sub}'. available: {', '.join(_scale_names())}")
 
 
 # ---------- root note (live transpose off A) ----------
@@ -1470,8 +1591,7 @@ def cmd_root(args):
     else:
         try: off = _clamp_root(int(sub))  # raw semitone offset
         except ValueError:
-            print(f"unknown root '{sub}'. give a note (C, F#, Bb), a ±semitone offset, or 'off'.")
-            return
+            return _err(f"unknown root '{sub}'. give a note (C, F#, Bb), a ±semitone offset, or 'off'.")
     cfg = load_config(); cfg["root_offset"] = off; save_config(cfg)
     print(f"root → {_NOTES[(9 + off) % 12]}  ({'+' if off >= 0 else ''}{off} from A)")
 
@@ -1503,7 +1623,7 @@ def cmd_chords(args):
         cfg["progression"] = prog; save_config(cfg); print("chords off"); return
     if sub == "every" and len(args) > 1:
         try: prog["step_s"] = max(2.0, min(60.0, float(args[1])))
-        except ValueError: print("usage: claudio chords every <seconds>"); return
+        except ValueError: return _err("usage: claudio chords every <seconds>", 2)
         cfg["progression"] = prog; save_config(cfg)
         print(f"chord length → {prog['step_s']:g}s"); _show(); return
     if sub == "use" and len(args) > 1: sub, args = args[1], args[1:]
@@ -1515,8 +1635,8 @@ def cmd_chords(args):
     if len(steps) >= 2:
         prog.update(preset="custom", steps=steps, enabled=True)
         cfg["progression"] = prog; save_config(cfg); _show(); return
-    print(f"unknown progression '{sub}'. presets: {', '.join(music.PROGRESSIONS)}; "
-          f"or give 2+ chords from: {', '.join(sorted(music.CHORDS))}")
+    return _err(f"unknown progression '{sub}'. presets: {', '.join(music.PROGRESSIONS)}; "
+                f"or give 2+ chords from: {', '.join(sorted(music.CHORDS))}")
 
 
 # ---------- preset reverb scale ----------
@@ -1527,18 +1647,18 @@ def cmd_preset_reverb(args):
     pname = active_preset_name()
     preset = load_preset(pname)
     if preset is None:
-        print(f"no active preset"); return
+        return _err(f"active preset '{pname}' not found")
     if not args:
         print(f"{pname}.reverb_scale = {preset.get('reverb_scale', 1.0)}")
         return
     try:
         scale = max(0.0, min(2.0, float(args[0])))
     except ValueError:
-        print("usage: claudio preset reverb <0..2>"); return
+        return _err("usage: claudio preset reverb <0..2>", 2)
     preset["reverb_scale"] = round(scale, 3)
     save_preset(pname, preset)
     print(f"{pname}.reverb_scale = {scale}  (regenerating samples...)")
-    cmd_regen([pname])
+    return cmd_regen([pname])
 
 
 # ---------- per-event delay ----------
@@ -1571,8 +1691,7 @@ def cmd_event(args):
     rest = args[1:]
     if sub == "delay":
         if len(rest) < 2:
-            print("usage: claudio event delay <Event> <ms|off> [feedback] [count]")
-            return
+            return _err("usage: claudio event delay <Event> <ms|off> [feedback] [count]")
         ev = rest[0]
         pname = active_preset_name()
         preset = load_preset(pname)
@@ -1595,15 +1714,14 @@ def cmd_event(args):
             fb = float(rest[2]) if len(rest) > 2 else 0.30
             count = int(rest[3]) if len(rest) > 3 else 3
         except ValueError:
-            print("usage: claudio event delay <Event> <ms> [feedback 0..0.85] [count 0..8]")
-            return
+            return _err("usage: claudio event delay <Event> <ms> [feedback 0..0.85] [count 0..8]", 2)
         fb = max(0.0, min(0.85, fb))
         count = max(0, min(8, count))
         spec.setdefault("effect", {})["delay"] = {"ms": ms, "feedback": round(fb, 3), "count": count}
         save_preset(pname, preset)
         print(f"{ev}: delay {ms}ms  fb={fb}  count={count}")
         return
-    print(f"unknown event subcommand: {sub}")
+    return _err(f"unknown event subcommand: {sub}")
 
 
 # ---------- demo / audition / status-line ----------
@@ -1640,7 +1758,7 @@ def cmd_demo(args):
     pname = active_preset_name()
     preset = load_preset(pname)
     if preset is None:
-        print(f"preset '{pname}' not found"); return
+        return _err(f"preset '{pname}' not found")
     voices_with_long_mioi = {n for n, v in preset.get("voices", {}).items()
                               if v.get("mioi", 0.5) >= 4.0}
     print(f"demo: {pname} ({preset.get('description','')[:60]})")
@@ -1685,7 +1803,7 @@ def cmd_audition(args):
     order = ["meadow", "cathedral", "rainfall", "koto"]
     available = [n for n in order if n in list_preset_names()]
     if not available:
-        print("no presets installed"); return
+        return _err("no presets installed")
     cur = active_preset_name()
     print("audition — listen to each preset, then pick one")
     print("─" * 70)
@@ -1697,7 +1815,6 @@ def cmd_audition(args):
             save_config(cfg)
             print(f"  ▶ {n:<10}  {blurbs.get(n, '')}")
             clear_mioi(n)
-            preset = load_preset(n)
             for ev in ("SessionStart", "UserPromptSubmit",
                        "PreToolUse", "PostToolUse",
                        "PreToolUse", "PostToolUse", "Stop"):
@@ -1723,7 +1840,7 @@ def cmd_audition(args):
         # restore previous
         save_config(cfg_save)
         print(f"kept '{cur}'")
-    except Exception as e:
+    except Exception:
         save_config(cfg_save)
         raise
 
@@ -1770,13 +1887,30 @@ def cmd_tune():
 
 def cmd_web(args):
     """Launch the browser control panel (pure-stdlib local server)."""
+    import socket
     web = str(HERE / "webui.py")
-    port = "8788"; do_open = True
-    rest = []
+    port = 8788; do_open = True
+    usage = "usage: claudio web [--port N] [--no-open]"
     for i, a in enumerate(args):
-        if a == "--port" and i + 1 < len(args): port = args[i + 1]
+        if a == "--port":
+            if i + 1 >= len(args): return _err(usage, 2)
+            try: port = int(args[i + 1])
+            except ValueError: return _err(f"claudio: --port expects a number, got '{args[i + 1]}'\n{usage}", 2)
+            if not 1 <= port <= 65535: return _err(f"claudio: --port must be 1-65535\n{usage}", 2)
         elif a == "--no-open": do_open = False
-    args = ["--port", port]
+    # webui.py binds after exec (we can't catch its OSError), so probe first.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    if not audio.IS_WIN:  # match http.server's allow_reuse_address (TIME_WAIT is fine)
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        probe.bind(("127.0.0.1", port))
+    except OSError as e:
+        return _err(f"claudio: can't listen on 127.0.0.1:{port} ({e.strerror or e}).\n"
+                    f"  Is the console already open? Try http://127.0.0.1:{port}/ "
+                    f"or pick another port: claudio web --port {port + 1}")
+    finally:
+        probe.close()
+    args = ["--port", str(port)]
     if do_open: args.append("--open")
     audio.exec_python(web, args)
 
@@ -1824,7 +1958,7 @@ def cmd_record(args):
             print("Not recording.")
         recs = s.get("recordings", [])
         if recs:
-            print(f"recordings/ ({len(recs)}):")
+            print(f"{paths.RECORDINGS_DIR} ({len(recs)}):")
             for r in recs[:10]:
                 print(f"  {r['name']}  ({r['size'] // 1024} KB)")
         return
@@ -1833,20 +1967,19 @@ def cmd_record(args):
         if not recs:
             print("No recordings yet — try:  claudio record")
             return
+        print(f"{paths.RECORDINGS_DIR}:")
         for r in recs:
-            print(f"  recordings/{r['name']}  ({r['size'] // 1024} KB)")
+            print(f"  {r['name']}  ({r['size'] // 1024} KB)")
         return
     if rec.is_active():
-        print("A recording is already running. `claudio record stop` to finish it.")
-        return
+        return _err("A recording is already running. `claudio record stop` to finish it.")
     secs = rec.DEFAULT_SECS
     if sub is not None:
         try:
             secs = int(sub)
         except ValueError:
-            print(f"usage: claudio record [seconds|stop|status|list]  "
-                  f"(default {rec.DEFAULT_SECS}s, max {rec.MAX_SECS}s)")
-            return
+            return _err(f"usage: claudio record [seconds|stop|status|list]  "
+                        f"(default {rec.DEFAULT_SECS}s, max {rec.MAX_SECS}s)", 2)
     secs = max(1, min(rec.MAX_SECS, secs))
     drone_note = "  🌫️ drone bed: on (fades in/out)" if drone else ""
     print(f"🔴 Recording up to {secs}s of Claudio — go drive your Claude sessions. "
@@ -1870,54 +2003,78 @@ def cmd_record(args):
 
 # ---------- main ----------
 
+# Alias → the name its entry uses in the help text above.
+_HELP_NAMES = {"check": "doctor", "rules": "rule", "ui": "web", "key": "root",
+               "progression": "chords", "prog": "chords", "songs": "song",
+               "jukebox": "play", "session-replay": "replay", "tip": "coffee",
+               "donate": "coffee", "rec": "record", "statusline": "status-line"}
+
+def _print_help(cmd=None):
+    """Print the __doc__ lines for one command (plus their continuation lines);
+    fall back to the full help when the command has no entry."""
+    name = _HELP_NAMES.get(cmd, cmd)
+    lines = (__doc__ or "").splitlines()
+    out, keep = [], False
+    for ln in lines:
+        if ln.startswith("  ") and not ln.startswith("   "):
+            keep = ln.split()[0] == name
+        elif not ln.startswith("   "):
+            keep = False
+        if keep: out.append(ln)
+    print("\n".join(out) if out else __doc__)
+    return 0
+
 def main(argv):
     if not argv: argv = ["status"]
     cmd = argv[0]; args = argv[1:]
-    if   cmd == "install":              cmd_install()
-    elif cmd == "setup":                sys.exit(cmd_setup(args))
-    elif cmd == "uninstall":            cmd_uninstall()
-    elif cmd == "start":                cmd_start()
-    elif cmd == "stop":                 cmd_stop()
-    elif cmd == "drone":                cmd_drone(args)
-    elif cmd in ("doctor", "check"):    sys.exit(cmd_doctor(args))
-    elif cmd == "migrate":              cmd_migrate(args)
-    elif cmd == "status":               cmd_status()
-    elif cmd == "test":                 cmd_test(args[0] if args else None)
-    elif cmd == "volume" and args:      cmd_volume(args[0])
-    elif cmd == "drone-volume" and args:cmd_drone_volume(args[0])
-    elif cmd == "preset":               sys.exit(cmd_preset(args) or 0)
-    elif cmd == "regen":                cmd_regen(args)
-    elif cmd == "sessions":             cmd_sessions()
-    elif cmd == "session":              cmd_session(args)
-    elif cmd == "here":                 cmd_here(args)
-    elif cmd in ("rule", "rules"):      cmd_rule(args)
-    elif cmd == "voice":                cmd_voice(args)
-    elif cmd == "map":                  cmd_map(args)
-    elif cmd == "mute":                 cmd_mute(args)
-    elif cmd == "unmute":               cmd_unmute(args)
-    elif cmd == "tune":                 cmd_tune()
-    elif cmd in ("web", "ui"):          cmd_web(args)
-    elif cmd == "off":                  cmd_off()
-    elif cmd == "on":                   cmd_on()
-    elif cmd == "toggle":               cmd_toggle()
-    elif cmd == "reset":                cmd_reset(args)
-    elif cmd == "demo":                 cmd_demo(args)
-    elif cmd == "audition":             cmd_audition(args)
-    elif cmd in ("status-line", "statusline"): cmd_status_line(args)
-    elif cmd == "scale":                cmd_scale(args)
-    elif cmd in ("root", "key"):        cmd_root(args)
-    elif cmd in ("chords", "progression", "prog"): cmd_chords(args)
-    elif cmd == "event":                cmd_event(args)
-    elif cmd in ("song", "songs"):      cmd_song(args)
-    elif cmd in ("play", "jukebox"):    cmd_play(args)
-    elif cmd in ("replay", "session-replay"): cmd_replay(args)
-    elif cmd == "quant":                cmd_quant(args)
-    elif cmd == "tempo":                cmd_tempo(args)
-    elif cmd == "grid":                 cmd_grid(args)
-    elif cmd in ("coffee", "tip", "donate"): cmd_coffee(args)
-    elif cmd in ("record", "rec"):      cmd_record(args)
-    else:
-        print(__doc__)
+    if cmd in ("-h", "--help", "help"):
+        return _print_help(args[0]) if args else (print(__doc__) or 0)
+    if "-h" in args or "--help" in args:
+        return _print_help(cmd)
+    if   cmd == "install":              return cmd_install()
+    elif cmd == "setup":                return cmd_setup(args)
+    elif cmd == "uninstall":            return cmd_uninstall()
+    elif cmd == "start":                return cmd_start()
+    elif cmd == "stop":                 return cmd_stop()
+    elif cmd == "drone":                return cmd_drone(args)
+    elif cmd in ("doctor", "check"):    return cmd_doctor(args)
+    elif cmd == "migrate":              return cmd_migrate(args)
+    elif cmd == "status":               return cmd_status()
+    elif cmd == "test":                 return cmd_test(args[0] if args else None)
+    elif cmd == "volume":               return cmd_volume(args[0] if args else None)
+    elif cmd == "drone-volume":         return cmd_drone_volume(args[0] if args else None)
+    elif cmd == "preset":               return cmd_preset(args)
+    elif cmd == "regen":                return cmd_regen(args)
+    elif cmd == "sessions":             return cmd_sessions()
+    elif cmd == "session":              return cmd_session(args)
+    elif cmd == "here":                 return cmd_here(args)
+    elif cmd in ("rule", "rules"):      return cmd_rule(args)
+    elif cmd == "voice":                return cmd_voice(args)
+    elif cmd == "map":                  return cmd_map(args)
+    elif cmd == "mute":                 return cmd_mute(args)
+    elif cmd == "unmute":               return cmd_unmute(args)
+    elif cmd == "tune":                 return cmd_tune()
+    elif cmd in ("web", "ui"):          return cmd_web(args)
+    elif cmd == "off":                  return cmd_off()
+    elif cmd == "on":                   return cmd_on()
+    elif cmd == "toggle":               return cmd_toggle()
+    elif cmd == "reset":                return cmd_reset(args)
+    elif cmd == "demo":                 return cmd_demo(args)
+    elif cmd == "audition":             return cmd_audition(args)
+    elif cmd in ("status-line", "statusline"): return cmd_status_line(args)
+    elif cmd == "scale":                return cmd_scale(args)
+    elif cmd in ("root", "key"):        return cmd_root(args)
+    elif cmd in ("chords", "progression", "prog"): return cmd_chords(args)
+    elif cmd == "event":                return cmd_event(args)
+    elif cmd in ("song", "songs"):      return cmd_song(args)
+    elif cmd in ("play", "jukebox"):    return cmd_play(args)
+    elif cmd in ("replay", "session-replay"): return cmd_replay(args)
+    elif cmd == "quant":                return cmd_quant(args)
+    elif cmd == "tempo":                return cmd_tempo(args)
+    elif cmd == "grid":                 return cmd_grid(args)
+    elif cmd in ("coffee", "tip", "donate"): return cmd_coffee(args)
+    elif cmd in ("record", "rec"):      return cmd_record(args)
+    return _err(f"claudio: unknown command '{cmd}' (see claudio --help)", 2)
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]) or 0)
