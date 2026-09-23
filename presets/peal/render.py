@@ -24,7 +24,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from synth import (SR, A4, freq, t_axis, adsr, soft_clip, lowpass_fft,
+from synth import (SR, freq, t_axis, adsr, soft_clip, lowpass_fft,
                     reverb_stereo, write_wav)
 
 import json as _json
@@ -203,7 +203,6 @@ def voice_topbell(seed):
           0.30*np.sin(2*np.pi*f0*2.01*t) * np.exp(-t*9.0) +
           0.10*np.sin(2*np.pi*f0*2.76*t) * np.exp(-t*16.0))
     # second bell, flicked ~60 ms later
-    off = int(0.06 * SR)
     t2 = np.maximum(t - 0.06, 0.0)
     gate = (t >= 0.06).astype(float)
     b1 = gate * (np.sin(2*np.pi*f1*t2) * np.exp(-t2*7.0) +

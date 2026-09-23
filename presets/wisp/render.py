@@ -13,7 +13,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from synth import (SR, A4, freq, t_axis, adsr, soft_clip, lowpass_fft,
+from synth import (SR, freq, t_axis, adsr, lowpass_fft,
                     reverb_stereo, write_wav)
 
 # === reverb_scale monkeypatch ===
@@ -72,7 +72,7 @@ def voice_pop(seed):
 def voice_breath(seed):
     """Soft filtered noise wash — quiet."""
     rng = np.random.default_rng(seed)
-    dur = 0.8; n = int(dur * SR); t = t_axis(dur)
+    dur = 0.8; n = int(dur * SR)
     noise = rng.standard_normal(n)
     bp = lowpass_fft(noise, 2500, order=2) - lowpass_fft(noise, 700, order=2)
     env = adsr(n, a=0.10, d=0.3, s_level=0.4, r=0.4)

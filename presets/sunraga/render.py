@@ -22,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from synth import (SR, A4, freq, t_axis, adsr, soft_clip, lowpass_fft,
+from synth import (SR, freq, t_axis, adsr, soft_clip, lowpass_fft,
                     reverb_stereo, write_wav)
 
 import json as _json
@@ -236,7 +236,6 @@ def voice_bloom(midi):
     fifth, maj6/9, octave) as bowed, slowly-swelling detuned string pairs. A
     moving lowpass opens the brightness as it blooms, then settles. Warm, never
     glassy, never heavy. ~6.5s."""
-    f0 = freq(midi)
     intervals = [0, 4, 7, 9, 12]   # Lydian-consonant raga stack
     dur = 6.5
     n = int(dur * SR); t = t_axis(dur)
@@ -275,7 +274,6 @@ def voice_cluster(midi):
     intervals = [0, 4, 7, 9, 12]
     dur = 6.0
     n = int(dur * SR); t = t_axis(dur)
-    rng = np.random.default_rng(int(midi)*29 + 11)
     sig = np.zeros(n)
     trem_hz = 13.0   # rolling mallet rate
     for i, iv in enumerate(intervals):

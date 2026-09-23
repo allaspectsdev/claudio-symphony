@@ -48,8 +48,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: python -m pip install -r requirements.txt ruff
-      - run: python -m compileall -q .
-      - run: ruff check --select E9,F63,F7,F82 .
+      - run: python -m compileall -q -x build .
+      - run: ruff check --select E9,F63,F7,F82,F401,F841 --extend-exclude build .
       - run: python cli.py preset validate --all
         env:
           CLAUDIO_HOME: ${{ runner.temp }}/claudio

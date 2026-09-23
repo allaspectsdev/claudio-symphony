@@ -23,7 +23,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from synth import (SR, A4, freq, t_axis, adsr, soft_clip, lowpass_fft,
+from synth import (SR, freq, t_axis, adsr, soft_clip, lowpass_fft,
                     reverb_stereo, write_wav)
 
 import json as _json
@@ -309,10 +309,9 @@ def voice_cluster(midi):
     (root, +4, +7, +9, +12) as separate quick nylon plucks, each delayed a
     little so it cascades like a thumb-roll, then a soft sustained halo holds
     it together. Bright, sweet, rolling. ~5.0s."""
-    f0 = freq(midi)
     intervals = [0, 4, 7, 9, 12]
     dur = 5.0
-    n = int(dur * SR); t = t_axis(dur)
+    n = int(dur * SR)
     roll = 0.085                               # ~85 ms between plucks (a roll)
     sig = np.zeros(n)
     for i, iv in enumerate(intervals):

@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from synth import (SR, A4, freq, t_axis, adsr, soft_clip, lowpass_fft,
+from synth import (SR, freq, t_axis, adsr, soft_clip, lowpass_fft,
                     reverb_stereo, write_wav)
 
 import json as _json
