@@ -5,7 +5,7 @@ Claude Code can fire overlapping asynchronous hooks.  The runtime therefore
 cannot use a fixed ``file.json.tmp`` or an unlocked read/modify/write cycle:
 one hook can rename another hook's temporary file, or overwrite state that was
 written after its read.  This module keeps the human-readable JSON files while
-serializing transactions with portable lock files and committing through a
+serializing transactions with kernel advisory locks and committing through a
 unique same-directory temporary file.
 """
 from __future__ import annotations
@@ -36,49 +36,88 @@ def _lock_path(path: Path) -> Path:
     return path.with_name(path.name + ".lock")
 
 
+# Hook processes have a hard ~1s budget (Claude kills them), so hot-path
+# callers wait only briefly.  ``stale_after`` is accepted for API
+# compatibility but no longer needed: locks are kernel advisory locks, which
+# the OS releases the instant the holder exits — even when a hook is killed
+# mid-transaction — so an orphaned lock cannot silence other sessions.
+HOT_TIMEOUT = 0.25
+HOT_STALE_AFTER = 3.0
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
+
+
+def _try_lock(fd) -> bool:
+    if fcntl is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        return True
+    except OSError:
+        return False
+
+
+def _unlock(fd) -> None:
+    if fcntl is not None:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    else:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+
 @contextmanager
-def file_lock(path, timeout=5.0, stale_after=30.0):
+def file_lock(path, timeout=5.0, stale_after=None):
     """Take an exclusive, cross-platform lock associated with ``path``.
 
-    ``O_EXCL`` works on Windows and POSIX.  A timestamped lock is reclaimed if
-    a process dies before cleanup; normal critical sections last milliseconds.
+    Uses ``flock`` (POSIX) or ``msvcrt.locking`` (Windows) on a persistent
+    ``<name>.lock`` file.  Each call opens its own descriptor, so the lock
+    excludes other threads as well as other processes.  The lock file itself
+    is left in place: deleting it would let two holders lock different inodes.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = _lock_path(path)
     deadline = time.monotonic() + max(0.0, float(timeout))
-    fd = None
-    while fd is None:
-        try:
-            candidate_fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            try:
-                os.write(candidate_fd, f"{os.getpid()} {time.time():.6f}\n".encode())
-            except Exception:
-                os.close(candidate_fd)
-                try: lock.unlink()
-                except FileNotFoundError: pass
-                raise
-            fd = candidate_fd
-        except FileExistsError:
-            try:
-                if time.time() - lock.stat().st_mtime > stale_after:
-                    lock.unlink()
-                    continue
-            except FileNotFoundError:
-                continue
+    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        while not _try_lock(fd):
             if time.monotonic() >= deadline:
                 raise LockTimeout(f"timed out waiting for {lock}")
             time.sleep(random.uniform(0.005, 0.02))
+    except BaseException:
+        os.close(fd)
+        raise
     try:
         yield
     finally:
         try:
-            os.close(fd)
+            _unlock(fd)
+        except OSError:
+            pass
         finally:
-            try:
-                lock.unlink()
-            except FileNotFoundError:
-                pass
+            os.close(fd)
+
+
+def _replace(src, dst, attempts=5):
+    """``os.replace`` that tolerates Windows' transient sharing violations
+    (another process briefly has ``dst`` open for reading)."""
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.01)
 
 
 def _write_unlocked(path: Path, data, *, indent=2, newline=True):
@@ -93,7 +132,7 @@ def _write_unlocked(path: Path, data, *, indent=2, newline=True):
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(str(tmp), str(path))
+        _replace(str(tmp), str(path))
     except Exception:
         try:
             tmp.unlink()
@@ -102,13 +141,14 @@ def _write_unlocked(path: Path, data, *, indent=2, newline=True):
         raise
 
 
-def save_json(path, data, *, indent=2, newline=True, timeout=5.0):
+def save_json(path, data, *, indent=2, newline=True, timeout=5.0, stale_after=30.0):
     path = Path(path)
-    with file_lock(path, timeout=timeout):
+    with file_lock(path, timeout=timeout, stale_after=stale_after):
         _write_unlocked(path, data, indent=indent, newline=newline)
 
 
-def update_json(path, default, mutator, *, indent=2, newline=True, timeout=5.0):
+def update_json(path, default, mutator, *, indent=2, newline=True, timeout=5.0,
+                stale_after=30.0):
     """Atomically load, mutate, and replace a JSON document.
 
     ``mutator`` receives the current document.  It may mutate it in place and
@@ -116,7 +156,7 @@ def update_json(path, default, mutator, *, indent=2, newline=True, timeout=5.0):
     is returned to the caller.
     """
     path = Path(path)
-    with file_lock(path, timeout=timeout):
+    with file_lock(path, timeout=timeout, stale_after=stale_after):
         current = load_json(path, default)
         replacement = mutator(current)
         if replacement is not None:
@@ -126,10 +166,10 @@ def update_json(path, default, mutator, *, indent=2, newline=True, timeout=5.0):
 
 
 @contextmanager
-def edit_json(path, default, *, indent=2, newline=True, timeout=5.0):
+def edit_json(path, default, *, indent=2, newline=True, timeout=5.0, stale_after=30.0):
     """Yield a document under lock and commit it when the context exits."""
     path = Path(path)
-    with file_lock(path, timeout=timeout):
+    with file_lock(path, timeout=timeout, stale_after=stale_after):
         current = load_json(path, default)
         yield current
         _write_unlocked(path, current, indent=indent, newline=newline)

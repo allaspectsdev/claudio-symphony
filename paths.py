@@ -129,14 +129,25 @@ def _legacy_builtin_was_edited(directory):
         return False
 
 
+def _read_migration_file():
+    try:
+        return json.loads(MIGRATION_FILE.read_text()) if MIGRATION_FILE.exists() else {}
+    except Exception:
+        return {}
+
+
 def migration_status():
     ensure_dirs()
+    status = _read_migration_file()
+    if status.get("small_complete") and status.get("large_complete"):
+        # Fully migrated: skip rescanning every built-in preset directory.
+        return {"small_complete": True, "large_complete": True,
+                "legacy_large_found": bool(status.get("legacy_large_found"))}
     try:
-        status = json.loads(MIGRATION_FILE.read_text()) if MIGRATION_FILE.exists() else {}
-    except Exception:
-        status = {}
-    legacy_large = (LEGACY_RECORDINGS_DIR.exists() or LEGACY_SONGS_DIR.exists()
-                    or any((p / "samples").exists() for p in BUILTIN_PRESETS_DIR.iterdir() if p.is_dir()))
+        legacy_large = (LEGACY_RECORDINGS_DIR.exists() or LEGACY_SONGS_DIR.exists()
+                        or any((p / "samples").exists() for p in BUILTIN_PRESETS_DIR.iterdir() if p.is_dir()))
+    except OSError:
+        legacy_large = False
     return {
         "small_complete": bool(status.get("small_complete")),
         "large_complete": bool(status.get("large_complete")),
@@ -191,10 +202,13 @@ def migrate_legacy(*, include_large=False):
     return result
 
 
-# Keep imports safe for hooks: only small files are copied automatically.
-ensure_dirs()
-if not migration_status()["small_complete"]:
-    try:
+# Keep imports safe for hooks: only small files are copied automatically, and
+# an unwritable data dir or missing checkout directory must never make
+# ``import paths`` raise (hooks would print the traceback).  The path constants
+# above stay importable; callers that write will surface their own errors.
+try:
+    ensure_dirs()
+    if not _read_migration_file().get("small_complete"):
         migrate_legacy(include_large=False)
-    except Exception:
-        pass
+except Exception:
+    pass
