@@ -167,7 +167,10 @@ def _argv_ffplay(exe):
 
 def _argv_mpv(exe):
     def build(path, gain, rate):
-        cmd = [exe, "--no-video", "--really-quiet", f"--volume={gain * 100:.1f}"]
+        # mpv's --volume is a cubic scale (amplitude = (vol/100)**3), so map
+        # our linear gain through a cube root to keep afplay -v loudness.
+        cmd = [exe, "--no-video", "--really-quiet",
+               f"--volume={100.0 * max(0.0, gain) ** (1.0 / 3.0):.1f}"]
         if rate is not None:
             cmd += ["--audio-pitch-correction=no", f"--speed={rate:.5f}"]
         cmd.append(path)
@@ -193,9 +196,11 @@ def _argv_pwplay(exe):
 
 
 def _argv_paplay(exe):
-    # paplay (PulseAudio): --volume on a 0..65536 scale; no pitch -> pre-render.
+    # paplay (PulseAudio): --volume is a pa_volume_t (65536 = 100%) on a cubic
+    # scale (pa_sw_volume_from_linear = cube root), so convert from linear.
+    # No pitch -> pre-render.
     def build(path, gain, rate):
-        return [exe, f"--volume={int(round(gain * 65536))}", path]
+        return [exe, f"--volume={int(round(65536 * max(0.0, gain) ** (1.0 / 3.0)))}", path]
     return build
 
 
@@ -301,8 +306,44 @@ def get_backend() -> Backend:
 # numpy varispeed pre-render (pitch + optional gain bake) for players that
 # can't resample. Reproduces afplay -r exactly: a naive linear-interpolated
 # resample => pitch AND duration shift together. The cache key buckets the rate
-# to 1 cent so per-note jitter doesn't explode the cache.
+# to 1 cent and a baked gain to 0.5 dB so per-note jitter doesn't explode the
+# cache, and includes the source's mtime+size so a regenerated sample never
+# serves a stale render.
 # ----------------------------------------------------------------------------
+_CACHE_MAX_FILES = 2000
+_CACHE_PRUNE_ODDS = 0.01        # prune on ~1% of cache misses (cheap, amortized)
+
+
+def _quantize_gain(g: float) -> float:
+    """Snap a linear gain to 0.5 dB steps (inaudible; bounds the cache)."""
+    g = float(g)
+    if g <= 1e-5:
+        return 0.0
+    db = round(20.0 * math.log10(g) * 2.0) / 2.0
+    return 10.0 ** (db / 20.0)
+
+
+def _prune_cache(max_files: int = _CACHE_MAX_FILES) -> None:
+    """Drop the oldest pre-renders beyond `max_files`. Best effort."""
+    try:
+        files = []
+        for f in CACHE_DIR.glob("*.wav"):
+            try:
+                files.append((f.stat().st_mtime, f))
+            except OSError:
+                pass
+        if len(files) <= max_files:
+            return
+        files.sort(key=lambda x: x[0])
+        for _, f in files[:len(files) - max_files]:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+
 def _prerender(path, rate, bake_gain=None) -> Optional[str]:
     try:
         import numpy as np
@@ -312,12 +353,19 @@ def _prerender(path, rate, bake_gain=None) -> Optional[str]:
     try:
         import wave
         cents = int(round(1200 * math.log2(rate))) if rate and rate > 0 else 0
-        gtag = "" if bake_gain is None else f"{bake_gain:.3f}"
-        key = hashlib.sha1(f"{path}:{cents}:{gtag}".encode()).hexdigest()[:16]
+        if bake_gain is not None:
+            bake_gain = _quantize_gain(bake_gain)
+        gtag = "" if bake_gain is None else f"{bake_gain:.4f}"
+        st = os.stat(str(path))
+        key = hashlib.sha1(f"{path}:{st.st_mtime_ns}:{st.st_size}:{cents}:{gtag}"
+                           .encode()).hexdigest()[:16]
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         out = CACHE_DIR / f"{key}.wav"
         if out.exists():
             return str(out)
+        import random
+        if random.random() < _CACHE_PRUNE_ODDS:
+            _prune_cache()
         with wave.open(str(path), "rb") as w:
             nch, sw, sr, nframes = (w.getnchannels(), w.getsampwidth(),
                                     w.getframerate(), w.getnframes())
@@ -340,11 +388,20 @@ def _prerender(path, rate, bake_gain=None) -> Optional[str]:
         if bake_gain is not None:
             buf = buf * float(bake_gain)
         buf = np.clip(buf, -32768, 32767).astype(np.int16)
-        with wave.open(str(out), "wb") as wo:
-            wo.setnchannels(nch)
-            wo.setsampwidth(2)
-            wo.setframerate(sr)
-            wo.writeframes(buf.tobytes())
+        # atomic: a concurrent hook must never play a half-written file
+        tmp = CACHE_DIR / f".{key}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with wave.open(str(tmp), "wb") as wo:
+                wo.setnchannels(nch)
+                wo.setsampwidth(2)
+                wo.setframerate(sr)
+                wo.writeframes(buf.tobytes())
+            os.replace(str(tmp), str(out))
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
         return str(out)
     except Exception as e:
         _log_once("prerender_fail", f"pre-render failed: {e}")
@@ -362,14 +419,21 @@ def _detach_kwargs():
     return {"start_new_session": True}
 
 
-_LIVE: List[subprocess.Popen] = []          # same-process registry (precise)
+# The player registry is touched on the hook path (1s budget): never wait long
+# for its lock, and treat a lock held >3s as stale. A timeout is swallowed by
+# the callers' try/except — losing one registry entry beats a late sound.
+_HOT_LOCK = {"timeout": getattr(stateio, "HOT_TIMEOUT", 0.25),
+             "stale_after": getattr(stateio, "HOT_STALE_AFTER", 3.0)}
+
+_LIVE: List[tuple] = []          # same-process registry (precise): (Popen, tag)
 _LIVE_LOCK = threading.Lock()
 
 
 def _write_players(data) -> None:
     """Serialize and atomically replace the cross-process PID registry."""
     try:
-        stateio.save_json(PLAYERS_FILE, data, indent=None, newline=False)
+        stateio.save_json(PLAYERS_FILE, data, indent=None, newline=False,
+                          **_HOT_LOCK)
     except Exception:
         pass
 
@@ -385,15 +449,16 @@ def _persist_pid(pid: int, tag: str) -> None:
                 data = []
             data.append(rec)
             return data[-256:]
-        stateio.update_json(PLAYERS_FILE, [], mutate, indent=None, newline=False)
+        stateio.update_json(PLAYERS_FILE, [], mutate, indent=None,
+                            newline=False, **_HOT_LOCK)
     except Exception:
         pass
 
 
 def _track(p: subprocess.Popen, tag: str) -> None:
     with _LIVE_LOCK:
-        _LIVE[:] = [q for q in _LIVE if q.poll() is None]
-        _LIVE.append(p)
+        _LIVE[:] = [(q, t) for q, t in _LIVE if q.poll() is None]
+        _LIVE.append((p, tag))
     if p and p.pid:
         _persist_pid(p.pid, tag)
 
@@ -647,12 +712,14 @@ def _stop(tag: Optional[str]) -> None:
     be = get_backend()
     # 1) same-process registry (precise)
     with _LIVE_LOCK:
-        for p in list(_LIVE):
+        for p, t in list(_LIVE):
+            if tag is not None and t != tag:
+                continue          # a tagged stop never cuts other plays
             try:
                 p.terminate()
             except Exception:
                 pass
-        _LIVE[:] = [q for q in _LIVE if q.poll() is None]
+        _LIVE[:] = [(q, t) for q, t in _LIVE if q.poll() is None]
     # 2) persisted PIDs (cross-process: `claudio off` vs hook-spawned players)
     try:
         if PLAYERS_FILE.exists():
@@ -664,7 +731,8 @@ def _stop(tag: Optional[str]) -> None:
                     elif tag is not None and rec.get("tag") != tag and _fresh(rec):
                         keep.append(rec)
                 return keep
-            stateio.update_json(PLAYERS_FILE, [], mutate, indent=None, newline=False)
+            stateio.update_json(PLAYERS_FILE, [], mutate, indent=None,
+                            newline=False, **_HOT_LOCK)
     except Exception:
         pass
     # 3) image-name sweep for OUR dedicated player binary (belt & suspenders).
@@ -688,7 +756,9 @@ def _stop(tag: Optional[str]) -> None:
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            check=False)
         elif shutil.which("pkill"):
-            subprocess.run(["pkill", "-f", be.image_name], check=False)
+            # -x: exact process-name match. `-f` matched full command lines,
+            # so e.g. an editor open on "mpv.conf" would have been killed too.
+            subprocess.run(["pkill", "-x", be.image_name], check=False)
 
 
 def stop_all() -> None:

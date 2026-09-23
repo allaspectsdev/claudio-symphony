@@ -7,7 +7,7 @@ Otherwise loops the preset's drone WAV via the detected audio backend
 (audio.py) until idle-timeout.
 Single-instance via PID file.
 """
-import os, sys, time, signal, json
+import os, sys, time, signal, wave
 from pathlib import Path
 
 def _root_offset(cfg):
@@ -53,6 +53,7 @@ STOP_SENTINEL = STATE / "drone.stop"   # cooperative stop (Windows has no SIGTER
 STATE.mkdir(exist_ok=True); LOGS.mkdir(exist_ok=True)
 
 IDLE_TIMEOUT_S = 10 * 60   # exit after 10 min of no events
+LOOP_LEAD_S = 0.02         # spawn the next pass this far before the clip ends
 
 def log(msg):
     try:
@@ -78,6 +79,48 @@ def existing_pid_alive():
 
 def write_pid():
     PID_FILE.write_text(str(os.getpid()))
+
+def claim_pid():
+    """Atomically take the single-instance slot (O_CREAT|O_EXCL), replacing
+    the pid file only when the pid it records is dead. Returns None on success,
+    else the live owner's pid (or -1 when another drone is mid-claim)."""
+    for _ in range(3):
+        try:
+            fd = os.open(str(PID_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            try:
+                raw = PID_FILE.read_text().strip()
+                age = time.time() - PID_FILE.stat().st_mtime
+            except FileNotFoundError:
+                continue                          # owner just left; retry
+            except Exception:
+                raw, age = "", 999.0
+            try:
+                pid = int(raw)
+            except ValueError:
+                if age < 2.0:
+                    return -1                     # a peer created it, not yet written
+                pid = None
+            if pid and pid != os.getpid() and audio.pid_alive(pid):
+                return pid
+            try:
+                PID_FILE.unlink()                 # stale: dead owner
+            except FileNotFoundError:
+                pass
+            continue
+        with os.fdopen(fd, "w") as f:
+            f.write(str(os.getpid()))
+        return None
+    return -1
+
+def wav_seconds(path):
+    """Clip length from the WAV header (None if unreadable)."""
+    try:
+        with wave.open(str(path), "rb") as w:
+            fr = w.getframerate()
+            return (w.getnframes() / float(fr)) if fr else None
+    except Exception:
+        return None
 
 def cleanup_pid():
     try:
@@ -110,12 +153,11 @@ def main():
         log(f"drone file missing: {drone_path}")
         sys.exit(1)
 
-    existing = existing_pid_alive()
-    if existing and existing != os.getpid():
+    existing = claim_pid()
+    if existing is not None:
         log(f"already running pid={existing}, exiting")
         print(f"drone already running pid={existing}", file=sys.stderr)
         sys.exit(1)
-    write_pid()
     ACTIVE_PRESET_FILE.write_text(name)
 
     if not HEARTBEAT_FILE.exists():
@@ -143,12 +185,17 @@ def main():
     log(f"drone start preset={name} pid={os.getpid()} gain={drone_gain} "
         f"backend={audio.get_backend().name}")
 
-    def should_exit():
+    def should_exit(cfg=None):
         age = heartbeat_age()
         if age is not None and age > IDLE_TIMEOUT_S:
             log(f"idle {age:.0f}s, exiting"); return True
         if STOP_SENTINEL.exists():
             log("stop sentinel; exiting"); return True
+        try:
+            if (cfg if cfg is not None else read_config()).get("muted"):
+                log("muted; exiting"); return True
+        except Exception:
+            pass
         # If user switched presets while drone running, exit so
         # `claudio start` can re-spawn for the new preset.
         try:
@@ -158,47 +205,68 @@ def main():
             pass
         return False
 
+    clip_s = wav_seconds(drone_path)
+    cur, prev = None, None          # prev: the pass we just handed off from
     try:
-        cur, cur_off = None, None
+        cur_off, cur_gain, cur_end = None, None, float("inf")
         while True:
-            if should_exit():
-                break
             try:
                 cfg = read_config()
+            except Exception:
+                cfg = {}
+            if should_exit(cfg):
+                break
+            try:
                 gain = float(cfg.get("drone_gain", preset.get("drone_gain", 0.45)))
                 off = _drone_semis(cfg)
                 rate = (2 ** (off / 12.0)) if off else None
-                if cur is None or cur.poll() is not None:
-                    # clip ended (or first pass) — start at the current pitch
-                    cur = audio.drone_play_start(drone_path, gain, rate)
-                    cur_off = off
-                    if cur is None:
+                clip_len = (clip_s / (rate or 1.0)) if clip_s else None
+                now = time.monotonic()
+                if (cur is None or cur.poll() is not None
+                        or now >= cur_end - LOOP_LEAD_S):
+                    # clip (nearly) ended, or first pass: start the next pass a
+                    # hair BEFORE the current one runs out, so there is no
+                    # spawn-latency gap at the loop seam.
+                    nxt = audio.drone_play_start(drone_path, gain, rate)
+                    if nxt is None:
                         # winsound/null backend: no live retune possible —
                         # fall back to the original blocking loop-per-clip.
                         code = audio.drone_play_once(drone_path, gain, rate)
                         if code == 127:
                             log("backend unavailable; exiting"); break
                         continue
-                elif off != cur_off:
+                    prev, cur = cur, nxt     # prev finishes its last ~20 ms
+                    cur_off, cur_gain = off, gain
+                    cur_end = time.monotonic() + clip_len if clip_len else float("inf")
+                elif off != cur_off or abs(gain - cur_gain) > 1e-3:
                     # The root moved (mic-jam, `claudio root`, or a chord
-                    # change with drone_chords on): retune NOW, not at the
-                    # next loop. Overlap the new player briefly so the swap
-                    # reads as the bed bending, not cutting.
-                    log(f"retune {cur_off:+d} → {off:+d} semis")
+                    # change with drone_chords on) or the drone-gain slider
+                    # moved: apply it NOW, not at the next loop. Overlap the
+                    # new player briefly so the swap reads as the bed bending,
+                    # not cutting.
+                    if off != cur_off:
+                        log(f"retune {cur_off:+d} → {off:+d} semis")
                     nxt = audio.drone_play_start(drone_path, gain, rate)
                     if nxt is not None:
+                        started = time.monotonic()
                         time.sleep(0.35)
                         try: cur.terminate()
                         except Exception: pass
-                        cur, cur_off = nxt, off
-                time.sleep(0.5)          # watcher cadence: ~½s root response
+                        cur, cur_off, cur_gain = nxt, off, gain
+                        cur_end = started + clip_len if clip_len else float("inf")
+                # watcher cadence: ~½s root response, but wake just in time
+                # to hand off to the next pass
+                remaining = cur_end - LOOP_LEAD_S - time.monotonic()
+                time.sleep(max(0.005, min(0.5, remaining)))
             except Exception as e:
                 log(f"player error: {e}")
                 time.sleep(2)
-        if cur is not None:
-            try: cur.terminate()
-            except Exception: pass
     finally:
+        # also reached via SIGTERM → sys.exit(): never leave a player behind
+        for p in (cur, prev):
+            if p is not None:
+                try: p.terminate()
+                except Exception: pass
         cleanup_pid()
         try:
             if STOP_SENTINEL.exists(): STOP_SENTINEL.unlink()

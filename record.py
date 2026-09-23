@@ -17,6 +17,7 @@ Usage (also driven by cli.py and the web UI):
 import os, sys, json, time, wave, signal, subprocess
 from pathlib import Path
 import numpy as np
+import audio
 import paths
 import preset_store
 
@@ -25,6 +26,11 @@ STATE = paths.STATE_DIR
 REC_DIR = STATE / "recording"
 ACTIVE = REC_DIR / "active.json"
 EVENTS = REC_DIR / "events.jsonl"
+# Cooperative stop (like drone.stop): the recorder polls for this file and
+# finalizes itself. Hard-killing it (taskkill /F on Windows) skipped finalize()
+# and leaked active.json, so the UI said "already recording" forever.
+STOP_SENTINEL = REC_DIR / "stop"
+STOP_WAIT_S = 3.0
 OUT_DIR = paths.RECORDINGS_DIR
 
 SR = 44100
@@ -43,19 +49,48 @@ DRONE_SRC = preset_store.sample_asset("cathedral", "drone.wav")
 
 # ---------- recording lifecycle (no numpy needed) ----------
 
-def is_active():
-    return ACTIVE.exists()
-
 def load_active():
     try:
         return json.loads(ACTIVE.read_text())
     except Exception:
         return None
 
+def _clear_stop():
+    try:
+        STOP_SENTINEL.unlink()
+    except Exception:
+        pass
+
+def _heal_stale(meta=None):
+    """If active.json names a recorder process that is gone (crashed, killed,
+    machine slept through it), salvage the take and clear the window. Returns
+    the still-live meta, or None when nothing is (any longer) recording."""
+    meta = meta if meta is not None else load_active()
+    if not meta:
+        return None
+    pid = meta.get("pid")
+    if pid and not audio.pid_alive(pid):
+        try:
+            finalize()                  # best effort: mix what was captured
+        except Exception:
+            pass
+        try:
+            ACTIVE.unlink()
+        except Exception:
+            pass
+        _clear_stop()
+        return None
+    return meta
+
+def is_active():
+    return _heal_stale() is not None
+
 def start(duration, src="cli", pid=None, drone=False, drone_gain=DRONE_REC_GAIN):
     duration = max(1, min(MAX_SECS, int(duration)))
     REC_DIR.mkdir(parents=True, exist_ok=True)
     OUT_DIR.mkdir(exist_ok=True)
+    _heal_stale()                        # a dead recorder's leftovers never block us
+    _clear_stop()
     stamp = time.strftime("%Y%m%d-%H%M%S")
     meta = {"start": time.time(), "duration": duration,
             "out": f"claudio-{stamp}",
@@ -65,25 +100,50 @@ def start(duration, src="cli", pid=None, drone=False, drone_gain=DRONE_REC_GAIN)
     ACTIVE.write_text(json.dumps(meta))
     return meta
 
-def stop():
-    """Signal a running recorder to finalize early (or finalize here if it's gone)."""
+def _wait_gone(pid, secs):
+    """Poll until the recorder has claimed finalize (active.json removed)."""
+    deadline = time.time() + secs
+    while time.time() < deadline:
+        if not ACTIVE.exists():
+            return True
+        if pid and not audio.pid_alive(pid):
+            return not ACTIVE.exists()
+        time.sleep(0.1)
+    return not ACTIVE.exists()
+
+def stop(wait=STOP_WAIT_S):
+    """Ask a running recorder to finalize early. Cooperative first: write the
+    stop sentinel and give the recorder a few seconds to mix + save itself.
+    Only if it doesn't respond is it terminated, and we finalize on its
+    behalf. Returns the recording's meta, or None when nothing was recording."""
     meta = load_active()
     if not meta:
         return None
     pid = meta.get("pid")
-    if pid:
+    if pid and pid != os.getpid() and audio.pid_alive(pid):
         try:
-            os.kill(int(pid), signal.SIGTERM)
-            return meta
-        except ProcessLookupError:
-            return finalize()          # recorder already gone — mix it ourselves
+            REC_DIR.mkdir(parents=True, exist_ok=True)
+            STOP_SENTINEL.write_text("1")
         except Exception:
             pass
-    return finalize()
+        if _wait_gone(pid, wait):
+            return meta                # the recorder is finalizing its own take
+        audio.terminate_pid(pid)       # unresponsive: fall back to terminate
+        _wait_gone(pid, 1.0)           # (POSIX SIGTERM still finalizes in-process)
+    if ACTIVE.exists():
+        finalize()                     # recorder gone — mix it ourselves
+    _clear_stop()
+    return meta
+
+def request_stop(wait=STOP_WAIT_S):
+    """Web/CLI entry point: stop the current recording gracefully.
+    True if a recording was stopped (or is now finalizing), False if none."""
+    return stop(wait=wait) is not None
 
 def _event_count():
     try:
-        return sum(1 for _ in EVENTS.open())
+        with EVENTS.open() as f:
+            return sum(1 for _ in f)
     except Exception:
         return 0
 
@@ -97,7 +157,7 @@ def list_recordings():
     return out
 
 def status():
-    meta = load_active()
+    meta = _heal_stale()
     out = {"active": bool(meta), "recordings": list_recordings(),
            "max": MAX_SECS, "default": DEFAULT_SECS}
     if meta:
@@ -255,16 +315,27 @@ def finalize():
     if not meta:
         return None
     try:
-        ACTIVE.unlink()
+        ACTIVE.unlink()                # claim: only one finalizer mixes a take
+    except FileNotFoundError:
+        return None
     except Exception:
         pass
-    return mix(meta["duration"], meta["out"],
+    _clear_stop()
+    # An early stop yields only what was actually recorded, not the full
+    # requested window (mix still adds the captured sounds' ring-out tail).
+    try:
+        dur = min(float(meta["duration"]),
+                  max(1.0, time.time() - float(meta["start"])))
+    except Exception:
+        dur = float(meta.get("duration", DEFAULT_SECS))
+    return mix(dur, meta["out"],
                drone=bool(meta.get("drone")),
                drone_gain=float(meta.get("drone_gain", DRONE_REC_GAIN)))
 
 def run(duration, src="cli", on_progress=None, drone=False, drone_gain=DRONE_REC_GAIN):
     """Foreground: open the window, count down, then mix + save.
-    Finalizes on the timer, on SIGINT (Ctrl-C), or on SIGTERM (`record stop`)."""
+    Finalizes on the timer, on SIGINT (Ctrl-C), on the stop sentinel
+    (`record stop` / the web UI), or on SIGTERM."""
     meta = start(duration, src=src, pid=os.getpid(), drone=drone, drone_gain=drone_gain)
     flag = {"stop": False}
     def _sig(_signum, _frame):
@@ -274,7 +345,7 @@ def run(duration, src="cli", on_progress=None, drone=False, drone_gain=DRONE_REC
     dur, t0 = meta["duration"], meta["start"]
     while not flag["stop"]:
         elapsed = time.time() - t0
-        if elapsed >= dur:
+        if elapsed >= dur or STOP_SENTINEL.exists():
             break
         if on_progress:
             on_progress(max(0.0, dur - elapsed), _event_count())
